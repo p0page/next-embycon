@@ -85,7 +85,9 @@ def play_all_files(
         selected_media_source = sources[0]
         source_id = selected_media_source.get("Id")
 
-        play_result = PlayUtils().get_play_url(selected_media_source)
+        play_result = PlayUtils().get_play_url(
+            selected_media_source, play_session_id, item_id
+        )
         playurl = play_result.playurl
         playback_type = play_result.playback_type
         listitem_props = play_result.listitem_props
@@ -319,7 +321,9 @@ def add_to_playlist(play_info: dict[str, str], monitor: PlaybackMonitorService) 
     selected_media_source = sources[0]
     source_id = selected_media_source.get("Id")
 
-    play_result = PlayUtils().get_play_url(selected_media_source)
+    play_result = PlayUtils().get_play_url(
+        selected_media_source, play_session_id, item_id
+    )
     playurl = play_result.playurl
     playback_type = play_result.playback_type
     listitem_props = play_result.listitem_props
@@ -601,7 +605,9 @@ def play_file(
 
     log.debug("play_session_id: {0}", play_session_id)
     log.debug("live_stream_id: {0}", live_stream_id)
-    play_result = PlayUtils().get_play_url(selected_media_source)
+    play_result = PlayUtils().get_play_url(
+        selected_media_source, play_session_id, item_id
+    )
     playurl = play_result.playurl
     playback_type = play_result.playback_type
     listitem_props = play_result.listitem_props

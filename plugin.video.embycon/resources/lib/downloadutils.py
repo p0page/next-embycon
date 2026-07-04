@@ -104,6 +104,7 @@ class DownloadUtils:
     use_https = False
     verify_cert = False
     host_domain = ""
+    base_path = ""
 
     def __new__(cls) -> DownloadUtils:
         if cls._instance is None:
@@ -329,20 +330,14 @@ class DownloadUtils:
         self.verify_cert = settings.getSetting("verify_cert") == "true"
         log.debug("verify_cert: {0}", self.verify_cert)
 
-        host = settings.getSetting("ipaddress")
+        host = settings.getSetting("ipaddress").strip()
+        self.base_path = ""
 
         if len(host) == 0 or host == "<none>":
             log.debug("No host set in settings")
             return
 
         port = settings.getSetting("port")
-
-        if not port and self.use_https:
-            port = "443"
-            settings.setSetting("port", port)
-        elif not port:
-            port = "80"
-            settings.setSetting("port", port)
 
         # if user entered a full path i.e. http://some_host:port
         if host.lower().strip().startswith(
@@ -361,14 +356,28 @@ class DownloadUtils:
             if url_bits.hostname is not None and len(url_bits.hostname) > 0:
                 host = url_bits.hostname
 
-                # if url_bits.username and url_bits.password:
-                #    host = "%s:%s@" % (url_bits.username, url_bits.password) + host
-
-                settings.setSetting("ipaddress", host)
+                if url_bits.username and url_bits.password:
+                    host = "%s:%s@" % (url_bits.username, url_bits.password) + host
 
             if url_bits.port is not None and url_bits.port > 0:
                 port = str(url_bits.port)
-                settings.setSetting("port", port)
+            elif self.use_https:
+                port = "443"
+            else:
+                port = "80"
+
+            settings.setSetting("port", port)
+
+            base_path = url_bits.path.rstrip("/")
+            if base_path.lower() != "/emby":
+                self.base_path = base_path
+
+        elif not port and self.use_https:
+            port = "443"
+            settings.setSetting("port", port)
+        elif not port:
+            port = "80"
+            settings.setSetting("port", port)
 
         self.host_domain = host + ":" + port
 
@@ -386,6 +395,9 @@ class DownloadUtils:
             server = "https://" + host
         else:
             server = "http://" + host
+
+        if self.base_path:
+            server += self.base_path
 
         return server
 

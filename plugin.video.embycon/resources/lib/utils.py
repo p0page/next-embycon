@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import List, Tuple
 
 from .downloadutils import DownloadUtils
+from .clientinfo import ClientInformation
 from .simple_logging import SimpleLogging
 
 
@@ -61,9 +62,49 @@ class PlayUrlResult:
     listitem_props: List[Tuple[str, str]]
 
 
+def _append_query_params(url: str, params: dict[str, object]) -> str:
+    base_url, kodi_separator, kodi_options = url.partition("|")
+    parsed = urllib.parse.urlsplit(base_url)
+    query_params = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    existing_keys = {key.lower() for key, _value in query_params}
+
+    for key, value in params.items():
+        if value is None or value == "":
+            continue
+        if key.lower() in existing_keys:
+            continue
+        query_params.append((key, str(value)))
+        existing_keys.add(key.lower())
+
+    query_string = urllib.parse.urlencode(query_params)
+    base_url = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, query_string, parsed.fragment)
+    )
+
+    if kodi_separator:
+        return base_url + kodi_separator + kodi_options
+    return base_url
+
+
+def _append_kodi_url_options(url: str, options: dict[str, object]) -> str:
+    option_pairs = [
+        (key, str(value)) for key, value in options.items() if value is not None
+    ]
+    if not option_pairs:
+        return url
+
+    base_url, kodi_separator, kodi_options = url.partition("|")
+    option_string = urllib.parse.urlencode(option_pairs)
+    if kodi_separator and kodi_options:
+        return base_url + "|" + kodi_options + "&" + option_string
+    return base_url + "|" + option_string
+
+
 class PlayUtils:
     @staticmethod
-    def get_play_url(media_source: dict) -> PlayUrlResult:
+    def get_play_url(
+        media_source: dict, play_session_id: str = "", item_id: str | None = None
+    ) -> PlayUrlResult:
         log.debug("get_play_url - media_source: {0}", media_source)
 
         # check if strm file Container
@@ -84,7 +125,7 @@ class PlayUtils:
         # get all the options
         addon_settings = xbmcaddon.Addon()
         download_utils = DownloadUtils()
-        server = download_utils.get_server(add_user_id=True)
+        server = download_utils.get_server()
         if server is None:
             log.debug("Error, no server info")
             return PlayUrlResult(playurl=None, playback_type=None, listitem_props=[])
@@ -94,6 +135,8 @@ class PlayUtils:
         allow_direct_file_play = (
             addon_settings.getSetting("allow_direct_file_play") == "true"
         )
+        auth_token = download_utils.authenticate()
+        device_id = ClientInformation().get_device_id()
 
         can_direct_play = media_source["SupportsDirectPlay"]
         can_direct_stream = media_source["SupportsDirectStream"]
@@ -124,12 +167,39 @@ class PlayUtils:
                 playurl = direct_path
                 playback_type = "0"
 
-        # check if file can be direct streamed
-        if can_direct_stream and playurl is None:
-            direct_stream_path = media_source["DirectStreamUrl"]
-            direct_stream_path = server + "/emby" + direct_stream_path
+        # check if file can be direct streamed or served through Emby's HTTP stream
+        if (can_direct_stream or can_direct_play) and playurl is None:
+            direct_stream_url = media_source.get("DirectStreamUrl")
+            if direct_stream_url:
+                direct_stream_path = server + "/emby" + direct_stream_url
+            else:
+                playback_item_id = (
+                    item_id or media_source.get("ItemId") or media_source.get("Id")
+                )
+                if not playback_item_id:
+                    log.debug("Error, no item id for HTTP direct stream")
+                    return PlayUrlResult(
+                        playurl=None, playback_type=None, listitem_props=[]
+                    )
+                direct_stream_path = (
+                    server
+                    + "/emby/Videos/"
+                    + str(playback_item_id)
+                    + "/stream?static=true"
+                )
+            direct_stream_path = _append_query_params(
+                direct_stream_path,
+                {
+                    "api_key": auth_token,
+                    "DeviceId": device_id,
+                    "MediaSourceId": media_source.get("Id"),
+                    "PlaySessionId": play_session_id,
+                },
+            )
             if use_https and not verify_cert:
-                direct_stream_path += "|verifypeer=false"
+                direct_stream_path = _append_kodi_url_options(
+                    direct_stream_path, {"verifypeer": "false"}
+                )
             playurl = direct_stream_path
             playback_type = "1"
 
@@ -167,9 +237,20 @@ class PlayUtils:
             new_url_params = "&".join(reduced_params)
 
             transcode_stream_path = server + "/emby" + url_path + "?" + new_url_params
+            transcode_stream_path = _append_query_params(
+                transcode_stream_path,
+                {
+                    "api_key": auth_token,
+                    "DeviceId": device_id,
+                    "MediaSourceId": media_source.get("Id"),
+                    "PlaySessionId": play_session_id,
+                },
+            )
 
             if use_https and not verify_cert:
-                transcode_stream_path += "|verifypeer=false"
+                transcode_stream_path = _append_kodi_url_options(
+                    transcode_stream_path, {"verifypeer": "false"}
+                )
 
             playurl = transcode_stream_path
             playback_type = "2"
