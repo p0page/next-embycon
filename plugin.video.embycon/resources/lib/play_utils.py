@@ -12,9 +12,16 @@ import os
 import base64
 
 from .simple_logging import SimpleLogging
-from .downloadutils import DownloadUtils
+from .downloadutils import DownloadUtils, redact_sensitive_data
 from .resume_dialog import ResumeDialog
-from .utils import PlayUtils, get_art, send_event_notification, convert_size
+from .utils import (
+    PlayUtils,
+    append_query_params,
+    build_emby_url,
+    get_art,
+    send_event_notification,
+    convert_size,
+)
 from .kodi_utils import HomeWindow
 from .translation import string_load
 from .datamanager import DataManager, clear_old_cache_data
@@ -33,6 +40,7 @@ from .tracking import timer
 from .skip_intro_dialog import SkipIntroMonitor
 
 log = SimpleLogging(__name__)
+WATCHED_MARK_PERCENTAGE = 90
 
 
 def play_all_files(
@@ -93,7 +101,7 @@ def play_all_files(
         listitem_props = play_result.listitem_props
         log.info(
             "Play URL: {0} PlaybackType: {1} ListItem Properties: {2}",
-            playurl,
+            redact_sensitive_data(playurl),
             playback_type,
             listitem_props,
         )
@@ -329,7 +337,7 @@ def add_to_playlist(play_info: dict[str, str], monitor: PlaybackMonitorService) 
     listitem_props = play_result.listitem_props
     log.info(
         "Play URL: {0} PlaybackType: {1} ListItem Properties: {2}",
-        playurl,
+        redact_sensitive_data(playurl),
         playback_type,
         listitem_props,
     )
@@ -613,7 +621,7 @@ def play_file(
     listitem_props = play_result.listitem_props
     log.info(
         "Play URL: {0} Playback Type: {1} ListItem Properties: {2}",
-        playurl,
+        redact_sensitive_data(playurl),
         playback_type,
         listitem_props,
     )
@@ -671,7 +679,7 @@ def play_file(
             audio_stream_index or "",
             subtitle_stream_index or "",
         )
-        log.debug("New playurl for transcoding: {0}", playurl)
+        log.debug("New playurl for transcoding: {0}", redact_sensitive_data(playurl))
 
     elif playback_type == "1":  # for direct stream add any streamable subtitles
         external_subs(selected_media_source, list_item, item_id)
@@ -1079,6 +1087,42 @@ def set_list_item_props(
     return list_item
 
 
+def _subtitle_index(index: object) -> str:
+    return str(index)
+
+
+def _subtitle_extension(stream: dict) -> str:
+    codec = str(stream.get("Codec", "srt")).lower()
+    return {
+        "subrip": "srt",
+        "srt": "srt",
+        "ass": "ass",
+        "ssa": "ssa",
+        "webvtt": "vtt",
+        "vtt": "vtt",
+    }.get(codec, codec or "srt")
+
+
+def get_subtitle_stream_url(
+    stream: dict,
+    server: str,
+    item_id: str,
+    source_id: str,
+    token: str,
+) -> str:
+    delivery_url = stream.get("DeliveryUrl")
+    if delivery_url:
+        subtitle_url = build_emby_url(server, delivery_url)
+    else:
+        subtitle_url = build_emby_url(
+            server,
+            "/Videos/%s/%s/Subtitles/%s/Stream.%s"
+            % (item_id, source_id, stream["Index"], _subtitle_extension(stream)),
+        )
+
+    return append_query_params(subtitle_url, {"api_key": token})
+
+
 # For transcoding only
 # Present the list of audio and subtitles to select from
 # for external streamable subtitles add the URL to the Kodi item and let Kodi handle it
@@ -1096,7 +1140,7 @@ def audio_subs_pref(
     audio_streams: list[str | xbmcgui.ListItem] = []
     subtitle_streams_list = {}
     subtitle_streams: list[str | xbmcgui.ListItem] = ["No subtitles"]
-    downloadable_streams = []
+    downloadable_streams = {}
     select_audio_index = audio_stream_index
     select_subs_index = subtitle_stream_index
     playurlprefs = ""
@@ -1110,6 +1154,7 @@ def audio_subs_pref(
     for stream in media_streams:
         # Since Emby returns all possible tracks together, have to sort them.
         index = stream["Index"]
+        index_key = _subtitle_index(index)
 
         if "Audio" in stream["Type"]:
             codec = stream["Codec"]
@@ -1147,9 +1192,9 @@ def audio_subs_pref(
             if forced:
                 track = "%s - Forced" % track
             if downloadable:
-                downloadable_streams.append(index)
+                downloadable_streams[index_key] = stream
 
-            subtitle_streams_list[track] = index
+            subtitle_streams_list[track] = index_key
             subtitle_streams.append(track)
 
     # set audio index
@@ -1172,18 +1217,23 @@ def audio_subs_pref(
     )
     if select_subs_index:
         # Load subtitles in the listitem if downloadable
-        if select_subs_index in downloadable_streams:
-            subtitle_url = "%s/emby/Videos/%s/%s/Subtitles/%s/Stream.srt"
-            subtitle_url = subtitle_url % (
-                download_utils.get_server(),
-                item_id,
-                source_id,
-                select_subs_index,
-            )
-            log.debug(
-                "Streaming subtitles url: {0} {1}", select_subs_index, subtitle_url
-            )
-            list_item.setSubtitles([subtitle_url])
+        select_subs_key = _subtitle_index(select_subs_index)
+        if select_subs_key in downloadable_streams:
+            server = download_utils.get_server()
+            if server is not None:
+                subtitle_url = get_subtitle_stream_url(
+                    downloadable_streams[select_subs_key],
+                    server,
+                    item_id,
+                    source_id,
+                    download_utils.authenticate(),
+                )
+                log.debug(
+                    "Streaming subtitles url: {0} {1}",
+                    select_subs_index,
+                    redact_sensitive_data(subtitle_url),
+                )
+                list_item.setSubtitles([subtitle_url])
         else:
             # Burn subtitles
             playurlprefs += "&SubtitleStreamIndex=%s" % select_subs_index
@@ -1198,20 +1248,25 @@ def audio_subs_pref(
             # User selected subtitles
             selected = subtitle_streams[resp]
             select_subs_index = subtitle_streams_list[selected]
+            select_subs_key = _subtitle_index(select_subs_index)
 
             # Load subtitles in the listitem if downloadable
-            if select_subs_index in downloadable_streams:
-                subtitle_url = "%s/emby/Videos/%s/%s/Subtitles/%s/Stream.srt"
-                subtitle_url = subtitle_url % (
-                    download_utils.get_server(),
-                    item_id,
-                    source_id,
-                    select_subs_index,
-                )
-                log.debug(
-                    "Streaming subtitles url: {0} {1}", select_subs_index, subtitle_url
-                )
-                list_item.setSubtitles([subtitle_url])
+            if select_subs_key in downloadable_streams:
+                server = download_utils.get_server()
+                if server is not None:
+                    subtitle_url = get_subtitle_stream_url(
+                        downloadable_streams[select_subs_key],
+                        server,
+                        item_id,
+                        source_id,
+                        download_utils.authenticate(),
+                    )
+                    log.debug(
+                        "Streaming subtitles url: {0} {1}",
+                        select_subs_index,
+                        redact_sensitive_data(subtitle_url),
+                    )
+                    list_item.setSubtitles([subtitle_url])
             else:
                 # Burn subtitles
                 playurlprefs += "&SubtitleStreamIndex=%s" % select_subs_index
@@ -1247,22 +1302,13 @@ def external_subs(
             and stream["IsTextSubtitleStream"]
             and stream["SupportsExternalStream"]
         ):
-            index = stream["Index"]
             source_id = media_source["Id"]
             server = download_utils.get_server()
+            if server is None:
+                continue
             token = download_utils.authenticate()
 
-            if stream.get("DeliveryUrl", "").lower().startswith("/videos"):
-                url = "%s/emby%s" % (server, stream.get("DeliveryUrl"))
-            else:
-                url = "%s/emby/Videos/%s/%s/Subtitles/%s/Stream.%s?api_key=%s" % (
-                    server,
-                    item_id,
-                    source_id,
-                    index,
-                    stream["Codec"],
-                    token,
-                )
+            url = get_subtitle_stream_url(stream, server, item_id, source_id, token)
 
             default = ""
             if stream["IsDefault"]:
@@ -1298,7 +1344,10 @@ def external_subs(
         resp = xbmcgui.Dialog().select(string_load(30292), sub_names)
         if resp > -1:
             selected_sub = externalsubs[resp]
-            log.debug("External Subtitle Selected: {0}", selected_sub)
+            log.debug(
+                "External Subtitle Selected: {0}",
+                redact_sensitive_data(selected_sub),
+            )
             list_item.setSubtitles([selected_sub])
 
 
@@ -1478,9 +1527,13 @@ def stop_all_playback(played_information: dict[str, dict]) -> None:
     home_screen = HomeWindow()
     home_screen.clear_property("currently_playing_id")
     download_utils = DownloadUtils()
+    has_transcode_playback = False
 
     for item_url in played_information:
         data = played_information.get(item_url, {})
+        if data.get("playback_type") in ("Transcode", "2"):
+            has_transcode_playback = True
+
         if data.get("currently_playing", False) is True:
             log.debug("item_url: {0}", item_url)
             log.debug("item_data: {0}", data)
@@ -1510,9 +1563,10 @@ def stop_all_playback(played_information: dict[str, dict]) -> None:
                 if data.get("play_action_type", "") == "play":
                     prompt_for_stop_actions(emby_item_id, data)
 
-    device_id = ClientInformation().get_device_id()
-    url = "{server}/emby/Videos/ActiveEncodings?DeviceId=%s" % device_id
-    download_utils.download_url(url, method="DELETE")
+    if has_transcode_playback:
+        device_id = ClientInformation().get_device_id()
+        url = "{server}/emby/Videos/ActiveEncodings?DeviceId=%s" % device_id
+        download_utils.download_url(url, suppress=True, method="DELETE")
 
 
 def get_playing_data(play_data_map: dict[str, dict]) -> dict | None:
@@ -1531,6 +1585,35 @@ def get_playing_data(play_data_map: dict[str, dict]) -> dict | None:
         playing_file = infolabel_path_and_file
 
     return play_data_map.get(playing_file)
+
+
+def _find_play_data_by_item_id(
+    played_information: dict[str, dict], item_id: str | None
+) -> dict | None:
+    if item_id is None:
+        return None
+
+    for play_data in played_information.values():
+        if str(play_data.get("item_id")) == str(item_id):
+            return play_data
+    return None
+
+
+def should_mark_item_watched(play_data: dict | None) -> bool:
+    if play_data is None:
+        return False
+
+    try:
+        current_position = float(play_data.get("currentPossition", 0) or 0)
+        duration = float(play_data.get("duration", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+
+    if duration <= 0 or current_position < 0:
+        return False
+
+    played_percentage = current_position / duration * 100
+    return played_percentage >= WATCHED_MARK_PERCENTAGE
 
 
 class PlaybackMonitorService(xbmc.Player):
@@ -1614,15 +1697,32 @@ class PlaybackMonitorService(xbmc.Player):
     def onPlayBackEnded(self) -> None:
         # Will be called when kodi stops playing a file
         log.info("onPlayBackEnded")
+        play_data = _find_play_data_by_item_id(
+            self.played_information, self.currently_playing_id
+        )
         stop_all_playback(self.played_information)
-        if self.currently_playing_id is not None:
+        if self.currently_playing_id is not None and should_mark_item_watched(
+            play_data
+        ):
             log.info("marking item watched : {0}", self.currently_playing_id)
             mark_item_watched(self.currently_playing_id, refresh=False)
+        elif self.currently_playing_id is not None:
+            log.info(
+                "Skipping watched mark below {0}% threshold: {1}",
+                WATCHED_MARK_PERCENTAGE,
+                self.currently_playing_id,
+            )
         self.currently_playing_id = None
 
     def onPlayBackStopped(self) -> None:
         # Will be called when user stops kodi playing a file
         log.info("onPlayBackStopped")
+        stop_all_playback(self.played_information)
+        self.currently_playing_id = None
+
+    def onPlayBackError(self) -> None:
+        # Will be called when kodi stops playback due to a player error
+        log.info("onPlayBackError")
         stop_all_playback(self.played_information)
         self.currently_playing_id = None
 

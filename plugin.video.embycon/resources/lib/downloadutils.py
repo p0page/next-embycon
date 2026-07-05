@@ -11,6 +11,7 @@ import ssl
 from io import BytesIO
 import gzip
 import json
+import re
 from urllib.parse import urlparse
 import urllib.parse
 from base64 import b64encode
@@ -24,6 +25,116 @@ from .translation import string_load
 from .tracking import timer
 
 log = SimpleLogging(__name__)
+
+SENSITIVE_LOG_KEYS = {
+    "access_token",
+    "accesstoken",
+    "api_key",
+    "apikey",
+    "authorization",
+    "password",
+    "pw",
+    "token",
+    "x_emby_token",
+    "x_mediabrowser_token",
+}
+
+
+def _is_sensitive_key(key: object) -> bool:
+    normalized = str(key).lower().replace("-", "_")
+    return normalized in SENSITIVE_LOG_KEYS
+
+
+def _redact_query_string(value: str) -> str:
+    pairs = urllib.parse.parse_qsl(value, keep_blank_values=True)
+    if not pairs:
+        return value
+    redacted_pairs = [
+        (key, "<redacted>" if _is_sensitive_key(key) else val)
+        for key, val in pairs
+    ]
+    return urllib.parse.urlencode(redacted_pairs)
+
+
+def _redact_url_credentials(parts: urllib.parse.SplitResult) -> str:
+    if parts.hostname is None:
+        return parts.netloc
+
+    host = parts.hostname
+    if ":" in host and not host.startswith("["):
+        host = "[%s]" % host
+    if parts.port is not None:
+        host += ":%s" % parts.port
+    if parts.username is None:
+        return host
+
+    username = urllib.parse.quote(urllib.parse.unquote(parts.username), safe="")
+    if parts.password is not None:
+        return username + ":<redacted>@" + host
+    return username + "@" + host
+
+
+def _redact_sensitive_string(value: str) -> str:
+    stripped = value.strip()
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            pass
+        else:
+            return json.dumps(redact_sensitive_data(parsed), ensure_ascii=False)
+
+    url_parts = urllib.parse.urlsplit(value)
+    if url_parts.scheme and url_parts.netloc:
+        query = _redact_query_string(url_parts.query) if url_parts.query else ""
+        netloc = _redact_url_credentials(url_parts)
+        return urllib.parse.urlunsplit(
+            (url_parts.scheme, netloc, url_parts.path, query, url_parts.fragment)
+        )
+
+    if "=" in value and "\n" not in value and ("&" in value or not " " in value):
+        pairs = urllib.parse.parse_qsl(value, keep_blank_values=True)
+        if pairs:
+            return urllib.parse.urlencode(
+                [
+                    (key, "<redacted>" if _is_sensitive_key(key) else val)
+                    for key, val in pairs
+                ]
+            )
+
+    redacted = value
+    sensitive_pattern = "|".join(
+        re.escape(key).replace("_", "[-_]?") for key in sorted(SENSITIVE_LOG_KEYS)
+    )
+    redacted = re.sub(
+        r"(?i)(\b(?:%s)\b\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^&,\s}\]]+)"
+        % sensitive_pattern,
+        lambda match: match.group(1) + "<redacted>",
+        redacted,
+    )
+    return redacted
+
+
+def redact_sensitive_data(value: object) -> object:
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>" if _is_sensitive_key(key) else redact_sensitive_data(val)
+            for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_data(item) for item in value]
+    if isinstance(value, tuple):
+        if len(value) == 2 and _is_sensitive_key(value[0]):
+            return (value[0], "<redacted>")
+        return tuple(redact_sensitive_data(item) for item in value)
+    if isinstance(value, bytes):
+        try:
+            return _redact_sensitive_string(value.decode("utf-8"))
+        except Exception:
+            return "<bytes>"
+    if isinstance(value, str):
+        return _redact_sensitive_string(value)
+    return value
 
 
 def save_user_details(
@@ -382,6 +493,7 @@ class DownloadUtils:
         self.host_domain = host + ":" + port
 
     def get_server(self, add_user_id: bool = False) -> str | None:
+        self.set_host_domain()
         host = self.host_domain
         if host is None or len(host) == 0:
             return None
@@ -669,7 +781,8 @@ class DownloadUtils:
         token = window.get_property("AccessToken")
         if token is not None and token != "":
             log.debug(
-                "EmbyCon DownloadUtils -> Returning saved AccessToken: {0}", token
+                "EmbyCon DownloadUtils -> Returning saved AccessToken: {0}",
+                "<redacted>",
             )
             return token
 
@@ -699,7 +812,7 @@ class DownloadUtils:
             suppress=True,
             authenticate=False,
         )
-        log.debug("AuthenticateByName: {0}", resp)
+        log.debug("AuthenticateByName: {0}", redact_sensitive_data(resp))
 
         access_token = None
         userid = None
@@ -714,7 +827,7 @@ class DownloadUtils:
             pass
 
         if access_token is not None:
-            log.debug("User Authenticated: {0}", access_token)
+            log.debug("User Authenticated: {0}", "<redacted>")
             log.debug("User Id: {0}", userid)
             window.set_property("AccessToken", access_token)
             window.set_property("userid", userid or "")
@@ -786,7 +899,7 @@ class DownloadUtils:
         if auth_token != "":
             headers["X-MediaBrowser-Token"] = auth_token
 
-        log.debug("EmbyCon Authentication Header: {0}", headers)
+        log.debug("EmbyCon Authentication Header: {0}", redact_sensitive_data(headers))
         return headers
 
     @timer
@@ -799,7 +912,7 @@ class DownloadUtils:
         authenticate: bool = True,
         headers: dict[str, str] | None = None,
     ) -> str:
-        log.debug("DownloadUrl : {0}", url)
+        log.debug("DownloadUrl : {0}", redact_sensitive_data(url))
 
         return_data = "null"
         settings = xbmcaddon.Addon()
@@ -816,11 +929,11 @@ class DownloadUtils:
         if settings.getSetting("suppressErrors") == "true":
             suppress = True
 
-        log.debug("Before: {0}", url)
+        log.debug("Before: {0}", redact_sensitive_data(url))
 
         if url.find("{server}") != -1:
             server = self.get_server()
-            log.debug("Server: ({0})", server)
+            log.debug("Server: ({0})", redact_sensitive_data(server))
             if server is None:
                 return return_data
             url = url.replace("{server}", server)
@@ -839,7 +952,7 @@ class DownloadUtils:
             filter_string = get_details_string()
             url = url.replace("{field_filters}", filter_string)
 
-        log.debug("After: {0}", url)
+        log.debug("After: {0}", redact_sensitive_data(url))
         conn = None
 
         try:
@@ -850,7 +963,7 @@ class DownloadUtils:
             port = url_bits.port
             user_name = url_bits.username
             user_password = url_bits.password
-            url_path = url_bits.path
+            url_path = url_bits.path or "/"
             url_puery = url_bits.query
 
             if not host_name or host_name == "<none>":
@@ -860,37 +973,54 @@ class DownloadUtils:
             if protocol.lower() == "https":
                 local_use_https = True
 
+            if port is None:
+                port = 443 if local_use_https else 80
+
             server = "%s:%s" % (host_name, port)
-            url_path = url_path + "?" + url_puery
+            if url_puery:
+                url_path = url_path + "?" + url_puery
 
             if local_use_https and self.verify_cert:
                 log.debug("Connection: HTTPS, Cert checked")
-                conn = http.client.HTTPSConnection(server, timeout=http_timeout)
+                conn = http.client.HTTPSConnection(
+                    host_name, port=port, timeout=http_timeout
+                )
             elif local_use_https and not self.verify_cert:
                 log.debug("Connection: HTTPS, Cert NOT checked")
                 ssl_context = ssl.create_default_context()
                 ssl_context.check_hostname = False
                 ssl_context.verify_mode = ssl.CERT_NONE
                 conn = http.client.HTTPSConnection(
-                    server,
+                    host_name,
+                    port=port,
                     timeout=http_timeout,
                     context=ssl_context,
                 )
             else:
                 log.debug("Connection: HTTP")
-                conn = http.client.HTTPConnection(server, timeout=http_timeout)
+                conn = http.client.HTTPConnection(
+                    host_name, port=port, timeout=http_timeout
+                )
 
             head = self.get_auth_header(authenticate)
 
             if user_name and user_password:
                 # add basic auth headers
-                user_and_pass = b64encode(b"%s:%s" % (user_name, user_password)).decode(
+                user_and_pass = b64encode(
+                    (
+                        "%s:%s"
+                        % (
+                            urllib.parse.unquote(user_name),
+                            urllib.parse.unquote(user_password),
+                        )
+                    ).encode("utf-8")
+                ).decode(
                     "ascii"
                 )
                 head["Authorization"] = "Basic %s" % user_and_pass
 
-            head["User-Agent"] = "EmbyCon-" + ClientInformation().get_version()
-            log.debug("HEADERS: {0}", head)
+            head["User-Agent"] = ClientInformation().get_user_agent()
+            log.debug("HEADERS: {0}", redact_sensitive_data(head))
 
             if post_body is not None:
                 if isinstance(post_body, dict):
@@ -902,14 +1032,14 @@ class DownloadUtils:
                 head["Content-Type"] = content_type
                 log.debug("Content-Type: {0}", content_type)
 
-                log.debug("POST DATA: {0}", post_body)
+                log.debug("POST DATA: {0}", redact_sensitive_data(post_body))
                 conn.request(method=method, url=url_path, body=post_body, headers=head)
             else:
                 conn.request(method=method, url=url_path, headers=head)
 
             data = conn.getresponse()
             log.debug("HTTP response: {0} {1}", data.status, data.reason)
-            log.debug("GET URL HEADERS: {0}", data.getheaders())
+            log.debug("GET URL HEADERS: {0}", redact_sensitive_data(data.getheaders()))
 
             if int(data.status) == 200:
                 ret_data: bytes = data.read()
@@ -926,21 +1056,28 @@ class DownloadUtils:
                 log.debug("Data Len After: {0}", len(return_data))
                 log.debug("====== 200 returned =======")
                 log.debug("Content-Type: {0}", content_type)
-                log.debug("{0}", return_data)
+                log.debug("{0}", redact_sensitive_data(return_data))
                 log.debug("====== 200 finished ======")
 
             elif int(data.status) >= 400:
                 if int(data.status) == 401:
-                    # remove any saved password
-                    m = hashlib.md5()
-                    m.update(username.encode("utf-8"))
-                    hashed_username = m.hexdigest()
+                    window = HomeWindow()
+                    window.clear_property("AccessToken")
                     log.error(
-                        "HTTP response error 401 auth error, removing any saved passwords for user: {0}",
-                        hashed_username,
+                        "HTTP response error 401 auth error, clearing access token"
                     )
-                    settings.setSetting("saved_user_password_" + hashed_username, "")
-                    # save_user_details(settings, "", "")
+                    if "AuthenticateByName" in url_path:
+                        # Only a failed login proves the saved password is invalid.
+                        m = hashlib.md5()
+                        m.update(username.encode("utf-8"))
+                        hashed_username = m.hexdigest()
+                        log.error(
+                            "Authentication failed, removing saved password for user: {0}",
+                            hashed_username,
+                        )
+                        settings.setSetting(
+                            "saved_user_password_" + hashed_username, ""
+                        )
 
                 log.error("HTTP response error: {0} {1}", data.status, data.reason)
                 if suppress is False:

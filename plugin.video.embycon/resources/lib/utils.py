@@ -100,6 +100,21 @@ def _append_kodi_url_options(url: str, options: dict[str, object]) -> str:
     return base_url + "|" + option_string
 
 
+def build_emby_url(server: str, path: str) -> str:
+    parsed = urllib.parse.urlsplit(path)
+    if parsed.scheme and parsed.netloc:
+        return path
+
+    base_url = server.rstrip("/")
+    url_path = path if path.startswith("/") else "/" + path
+    if url_path.lower() == "/emby" or url_path.lower().startswith("/emby/"):
+        return base_url + url_path
+    return base_url + "/emby" + url_path
+
+
+append_query_params = _append_query_params
+
+
 class PlayUtils:
     @staticmethod
     def get_play_url(
@@ -171,7 +186,7 @@ class PlayUtils:
         if (can_direct_stream or can_direct_play) and playurl is None:
             direct_stream_url = media_source.get("DirectStreamUrl")
             if direct_stream_url:
-                direct_stream_path = server + "/emby" + direct_stream_url
+                direct_stream_path = build_emby_url(server, direct_stream_url)
             else:
                 playback_item_id = (
                     item_id or media_source.get("ItemId") or media_source.get("Id")
@@ -181,11 +196,9 @@ class PlayUtils:
                     return PlayUrlResult(
                         playurl=None, playback_type=None, listitem_props=[]
                     )
-                direct_stream_path = (
-                    server
-                    + "/emby/Videos/"
-                    + str(playback_item_id)
-                    + "/stream?static=true"
+                direct_stream_path = build_emby_url(
+                    server,
+                    "/Videos/" + str(playback_item_id) + "/stream?static=true",
                 )
             direct_stream_path = _append_query_params(
                 direct_stream_path,
@@ -207,9 +220,9 @@ class PlayUtils:
         if can_transcode and playurl is None:
             transcode_stream_path = media_source["TranscodingUrl"]
 
-            url_path, url_params = transcode_stream_path.split("?")
+            url_path, _separator, url_params = transcode_stream_path.partition("?")
 
-            params = url_params.split("&")
+            params = url_params.split("&") if url_params else []
             log.debug("Streaming Params Before : {0}", params)
 
             # remove the audio and subtitle indexes
@@ -236,7 +249,9 @@ class PlayUtils:
 
             new_url_params = "&".join(reduced_params)
 
-            transcode_stream_path = server + "/emby" + url_path + "?" + new_url_params
+            transcode_stream_path = build_emby_url(server, url_path)
+            if new_url_params:
+                transcode_stream_path += "?" + new_url_params
             transcode_stream_path = _append_query_params(
                 transcode_stream_path,
                 {

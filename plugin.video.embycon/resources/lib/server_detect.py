@@ -77,7 +77,7 @@ def check_connection_speed() -> int:
         conn = http.client.HTTPConnection(server, timeout=http_timeout)
 
     head = du.get_auth_header(True)
-    head["User-Agent"] = "EmbyCon-" + ClientInformation().get_version()
+    head["User-Agent"] = ClientInformation().get_user_agent()
 
     conn.request(method="GET", url=url_path, headers=head)
 

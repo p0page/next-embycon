@@ -1,6 +1,7 @@
 # Gnu General Public License - see LICENSE.TXT
 
 from uuid import uuid4 as uuid4
+import xbmc
 import xbmcaddon
 import xbmcvfs
 
@@ -46,3 +47,14 @@ class ClientInformation:
     @staticmethod
     def get_client() -> str:
         return "Kodi EmbyCon"
+
+    @staticmethod
+    def get_user_agent() -> str:
+        try:
+            kodi_version = xbmc.getInfoLabel("System.BuildVersion").split()[0]
+        except Exception:
+            kodi_version = ""
+
+        if not kodi_version:
+            kodi_version = "21.0"
+        return "Kodi/" + kodi_version
