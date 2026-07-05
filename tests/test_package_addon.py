@@ -9,7 +9,7 @@ from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = ROOT / "scripts" / "package_addon.py"
-ADDON_DIR = ROOT / "plugin.video.embycon"
+ADDON_DIR = ROOT / "plugin.video.nextembycon"
 
 
 def load_package_addon_module():
@@ -32,7 +32,9 @@ class PackageAddonTests(unittest.TestCase):
                 infos = zip_file.infolist()
                 names = zip_file.namelist()
 
-            self.assertTrue(zip_path.name.startswith("plugin.video.embycon-"))
-            self.assertTrue(all(name.startswith("plugin.video.embycon/") for name in names))
+            self.assertTrue(zip_path.name.startswith("plugin.video.nextembycon-"))
+            self.assertTrue(
+                all(name.startswith("plugin.video.nextembycon/") for name in names)
+            )
             self.assertFalse(any(info.is_dir() for info in infos))
-            self.assertIn("plugin.video.embycon/addon.xml", names)
+            self.assertIn("plugin.video.nextembycon/addon.xml", names)

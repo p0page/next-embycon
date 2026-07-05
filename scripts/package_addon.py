@@ -47,7 +47,7 @@ def build_zip(addon_dir: Path, dist_dir: Path, copy_to: Path | None = None) -> P
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Package the Kodi addon zip.")
-    parser.add_argument("--addon-dir", default="plugin.video.embycon")
+    parser.add_argument("--addon-dir", default="plugin.video.nextembycon")
     parser.add_argument("--dist-dir", default="dist")
     parser.add_argument("--copy-to")
     args = parser.parse_args()

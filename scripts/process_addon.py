@@ -32,7 +32,7 @@ git_result = subprocess.run(
     ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True
 )
 repo_path = git_result.stdout.strip()
-addon_path = os.path.join(repo_path, "plugin.video.embycon")
+addon_path = os.path.join(repo_path, "plugin.video.nextembycon")
 
 print("Git repo path: " + repo_path)
 print("Addon path   : " + addon_path)
@@ -100,7 +100,9 @@ copy2(
     os.path.join(package_path, "addon.xml"),
 )
 
-embycon_repo_path = os.path.join(embycon_repo_path, ver_name, "plugin.video.embycon")
+embycon_repo_path = os.path.join(
+    embycon_repo_path, ver_name, "plugin.video.nextembycon"
+)
 copy2(
     os.path.join(package_path, "addon.xml"),
     os.path.join(embycon_repo_path, "addon.xml"),

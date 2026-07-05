@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Parse Kodi log file and extract EmbyCon timing data to JSON.
+Parse Kodi log file and extract Next EmbyCon timing data to JSON.
 
 Usage:
     python parse_timing_log.py [input_log_file] [output_json_file]
@@ -21,19 +21,24 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+TIMING_LOG_PREFIXES = (
+    "Next EmbyCon.resources.lib.tracking|INFO|timing_data|",
+    "EmbyCon.resources.lib.tracking|INFO|timing_data|",
+)
+
 
 def parse_timing_line(line: str) -> dict[str, Any] | None:
     """
     Parse a timing log line and extract relevant data.
 
     Expected format:
-    YYYY-MM-DD HH:MM:SS.mmm T:<thread_id> info <general>: EmbyCon.resources.lib.tracking|INFO|timing_data|<function>|<start>|<end>|
+    YYYY-MM-DD HH:MM:SS.mmm T:<thread_id> info <general>: Next EmbyCon.resources.lib.tracking|INFO|timing_data|<function>|<start>|<end>|
 
     Returns:
         dict or None: Parsed data with keys: id, function, start, end
     """
     # Check if line contains timing_data
-    if "EmbyCon.resources.lib.tracking|INFO|timing_data|" not in line:
+    if not any(prefix in line for prefix in TIMING_LOG_PREFIXES):
         return None
 
     # Extract thread ID
@@ -51,7 +56,7 @@ def parse_timing_line(line: str) -> dict[str, Any] | None:
     message_part = parts[3].strip()
 
     # Split by pipe to get tracking fields
-    # Expected: EmbyCon.resources.lib.tracking|INFO|timing_data|<function>|<start>|<end>|
+    # Expected: <addon name>.resources.lib.tracking|INFO|timing_data|<function>|<start>|<end>|
     fields = message_part.split("|")
 
     # We need at least 6 fields

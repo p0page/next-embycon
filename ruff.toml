@@ -1,10 +1,10 @@
 include = [
-  "plugin.video.embycon/resources/**/*.py",
-  "plugin.video.embycon/*.py"
+  "plugin.video.nextembycon/resources/**/*.py",
+  "plugin.video.nextembycon/*.py"
 ]
 
 exclude = [
-  "plugin.video.embycon/resources/lib/websocket/"
+  "plugin.video.nextembycon/resources/lib/websocket/"
 ]
 
 target-version = "py38"

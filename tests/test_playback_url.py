@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "plugin.video.embycon"))
+sys.path.insert(0, str(ROOT / "plugin.video.nextembycon"))
 
 
 class FakeAddon:
@@ -297,6 +297,7 @@ from resources.lib import play_utils  # noqa: E402
 from resources.lib import menu_functions  # noqa: E402
 from resources.lib import websocket_client  # noqa: E402
 from resources.lib import utils  # noqa: E402
+from resources.lib import server_detect  # noqa: E402
 
 
 class PlaybackUrlTests(unittest.TestCase):
@@ -620,6 +621,26 @@ class DownloadUrlTests(unittest.TestCase):
         self.assertEqual(headers["User-Agent"], "Kodi/test-version")
         self.assertNotIn("EmbyCon", headers["User-Agent"])
 
+    def test_auth_header_uses_next_embycon_client_and_device_fallback(self) -> None:
+        class NextEmbyConClientInformation(FakeClientInformation):
+            @staticmethod
+            def get_client() -> str:
+                return "Kodi Next EmbyCon"
+
+        FakeAddon.settings["deviceName"] = ""
+        downloadutils_module.ClientInformation = NextEmbyConClientInformation
+        download_utils = DownloadUtils()
+
+        headers = download_utils.get_auth_header(authenticate=False)
+
+        self.assertEqual(
+            headers["X-Emby-Authorization"],
+            (
+                'MediaBrowser Client="Kodi Next EmbyCon",'
+                'Device="Next EmbyCon",DeviceId="device-456",Version="test-version"'
+            ),
+        )
+
     def test_redacts_sensitive_data_for_logs(self) -> None:
         value = {
             "X-MediaBrowser-Token": "token-123",
@@ -676,6 +697,10 @@ class SessionTelemetryTests(unittest.TestCase):
         self.assertEqual(calls[0]["url"], "{server}/emby/Sessions/Capabilities/Full?format=json")
         self.assertEqual(calls[0]["method"], "POST")
         self.assertTrue(calls[0]["suppress"])
+        self.assertNotIn("IconUrl", calls[0]["post_body"])
+        self.assertTrue(calls[0]["post_body"]["SupportsMediaControl"])
+        self.assertEqual(calls[0]["post_body"]["PlayableMediaTypes"], ["Video", "Audio"])
+        self.assertIn("PlayMediaSource", calls[0]["post_body"]["SupportedCommands"])
 
     def test_playback_session_updates_are_suppressed(self) -> None:
         class FakePlayer:
@@ -727,6 +752,54 @@ class SessionTelemetryTests(unittest.TestCase):
         ]
         self.assertEqual(len(session_calls), 3)
         self.assertTrue(all(call["suppress"] for call in session_calls))
+
+
+class NotificationNamespaceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_execute_builtin = utils.xbmc.executebuiltin
+        self.original_play_file = play_utils.play_file
+        self.played_items: list[dict[str, object]] = []
+        play_utils.play_file = (
+            lambda play_info, play_monitor: self.played_items.append(play_info)
+        )
+
+    def tearDown(self) -> None:
+        utils.xbmc.executebuiltin = self.original_execute_builtin
+        play_utils.play_file = self.original_play_file
+
+    def test_event_notifications_use_next_embycon_namespace(self) -> None:
+        commands = []
+        utils.xbmc.executebuiltin = lambda command: commands.append(command)
+
+        utils.send_event_notification("nextembycon_play_action", {"item_id": "item-1"})
+
+        self.assertEqual(len(commands), 1)
+        self.assertIn("NotifyAll(plugin.video.nextembycon.SIGNAL,", commands[0])
+        self.assertIn("nextembycon_play_action", commands[0])
+
+    def test_monitor_ignores_upstream_embycon_signal_namespace(self) -> None:
+        payload = base64.b64encode(b'{"item_id":"item-1"}').decode("utf-8")
+        monitor = play_utils.MonitoringService(play_utils.PlaybackMonitorService())
+
+        monitor.onNotification(
+            "embycon.SIGNAL",
+            "Other.nextembycon_play_action",
+            '["%s"]' % payload,
+        )
+
+        self.assertEqual(self.played_items, [])
+
+    def test_monitor_accepts_next_embycon_signal_namespace(self) -> None:
+        payload = base64.b64encode(b'{"item_id":"item-1"}').decode("utf-8")
+        monitor = play_utils.MonitoringService(play_utils.PlaybackMonitorService())
+
+        monitor.onNotification(
+            "plugin.video.nextembycon.SIGNAL",
+            "Other.nextembycon_play_action",
+            '["%s"]' % payload,
+        )
+
+        self.assertEqual(self.played_items, [{"item_id": "item-1"}])
 
 
 class BackgroundRequestTests(unittest.TestCase):
@@ -842,7 +915,7 @@ class MenuStructureTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original_argv = sys.argv[:]
         self.original_string_load = menu_functions.string_load
-        sys.argv = ["plugin://plugin.video.embycon/", "1", ""]
+        sys.argv = ["plugin://plugin.video.nextembycon/", "1", ""]
 
         xbmcplugin = sys.modules["xbmcplugin"]
         xbmcplugin.added_items = []
@@ -914,6 +987,68 @@ class MenuStructureTests(unittest.TestCase):
 
         self.assertEqual(media_types, ["movies", "tvshows", "boxsets"])
         self.assertEqual(include_item_types, ["Movie", "Series", "Boxset"])
+
+
+class ClonedSkinFocusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_settings = FakeAddon.settings.copy()
+        self.original_get_skin_dir = getattr(menu_functions.xbmc, "getSkinDir", None)
+        self.original_execute_builtin = menu_functions.xbmc.executebuiltin
+        self.original_dialog = menu_functions.xbmcgui.Dialog
+        self.original_download_utils = menu_functions.DownloadUtils
+        self.original_home_window = menu_functions.HomeWindow
+
+    def tearDown(self) -> None:
+        FakeAddon.settings = self.original_settings
+        if self.original_get_skin_dir is None:
+            delattr(menu_functions.xbmc, "getSkinDir")
+        else:
+            menu_functions.xbmc.getSkinDir = self.original_get_skin_dir
+        menu_functions.xbmc.executebuiltin = self.original_execute_builtin
+        menu_functions.xbmcgui.Dialog = self.original_dialog
+        menu_functions.DownloadUtils = self.original_download_utils
+        menu_functions.HomeWindow = self.original_home_window
+
+    def test_change_user_restores_focus_for_next_embycon_cloned_skin(self) -> None:
+        class FakeDialogForUserChange:
+            def select(self, *args, **kwargs) -> int:
+                return 0
+
+            def input(self, *args, **kwargs) -> str:
+                return ""
+
+        class FakeDownloadUtilsForUserChange:
+            def get_server(self) -> str:
+                return "https://media.example.test"
+
+            def download_url(self, url: str, authenticate: bool = True) -> str:
+                return (
+                    '[{"Name":"cyber","Id":"user-id","HasPassword":false}]'
+                )
+
+            def authenticate(self) -> str:
+                return "token-123"
+
+            def get_user_id(self) -> str:
+                return "user-id"
+
+        commands = []
+        menu_functions.xbmc.getSkinDir = lambda: "skin.estuary_nextembycon"
+        menu_functions.xbmc.executebuiltin = lambda command: commands.append(command)
+        menu_functions.xbmcgui.Dialog = lambda: FakeDialogForUserChange()
+        menu_functions.DownloadUtils = FakeDownloadUtilsForUserChange
+        menu_functions.HomeWindow = FakeHomeWindow
+        FakeHomeWindow.props = {}
+        FakeAddon.settings = {
+            **FakeAddon.settings,
+            "save_user_to_settings": "true",
+            "username": "",
+            "password": "",
+        }
+
+        menu_functions.do_user_change({"user": "cyber", "userid": "user-id"})
+
+        self.assertIn("SetFocus(9000, 0, absolute)", commands)
 
 
 class PlaybackSelectionTests(unittest.TestCase):

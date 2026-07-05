@@ -110,7 +110,7 @@ def main() -> None:
     strings_po: Path = Path(
         os.path.join(
             repo_root,
-            "plugin.video.embycon",
+            "plugin.video.nextembycon",
             "resources",
             "language",
             "resource.language.en_gb",
@@ -133,7 +133,9 @@ def main() -> None:
     search_files.extend(repo_root.rglob("*.py"))
     search_files.append(
         Path(
-            os.path.join(repo_root, "plugin.video.embycon", "resources", "settings.xml")
+            os.path.join(
+                repo_root, "plugin.video.nextembycon", "resources", "settings.xml"
+            )
         )
     )
     search_files.append(strings_po)

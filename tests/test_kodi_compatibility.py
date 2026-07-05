@@ -10,7 +10,7 @@ from zipfile import ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ADDON_DIR = ROOT / "plugin.video.embycon"
+ADDON_DIR = ROOT / "plugin.video.nextembycon"
 ADDON_XML = ADDON_DIR / "addon.xml"
 PACKAGE_SCRIPT = ROOT / "scripts" / "package_addon.py"
 VALID_KODI_ADDON_IDENTIFIER_CHARACTERS = (
