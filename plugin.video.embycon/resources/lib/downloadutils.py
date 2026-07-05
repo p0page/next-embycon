@@ -690,7 +690,7 @@ class DownloadUtils:
         user_name = urllib.parse.quote(user_name)
         pwd_text = urllib.parse.quote(user_details.get("password", ""))
 
-        message_data = "username=" + user_name + "&pw=" + pwd_text
+        message_data = "Username=" + user_name + "&Pw=" + pwd_text
 
         resp = self.download_url(
             url,

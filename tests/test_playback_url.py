@@ -98,6 +98,7 @@ def install_kodi_stubs() -> None:
 install_kodi_stubs()
 
 from resources.lib.downloadutils import DownloadUtils  # noqa: E402
+from resources.lib import downloadutils as downloadutils_module  # noqa: E402
 from resources.lib import utils  # noqa: E402
 
 
@@ -111,8 +112,42 @@ class PlaybackUrlTests(unittest.TestCase):
             "port": "443",
         }
         FakeHomeWindow.props = {"userid": "user-id", "userimage": "DefaultUser.png"}
+        DownloadUtils._instance = None
+        downloadutils_module.HomeWindow = FakeHomeWindow
         utils.DownloadUtils = FakeDownloadUtils
         utils.ClientInformation = FakeClientInformation
+
+    def test_authenticate_uses_current_emby_form_field_names(self) -> None:
+        captured = {}
+
+        def fake_download_url(
+            url: str,
+            suppress: bool = False,
+            post_body: str | dict | None = None,
+            method: str = "GET",
+            authenticate: bool = True,
+            headers: dict[str, str] | None = None,
+        ) -> str:
+            if "AuthenticateByName" in url:
+                captured["url"] = url
+                captured["post_body"] = post_body
+                captured["method"] = method
+                captured["authenticate"] = authenticate
+            return (
+                '{"AccessToken":"token-123",'
+                '"User":{"Id":"user-id","Name":"cyber"}}'
+            )
+
+        download_utils = DownloadUtils()
+        download_utils.download_url = fake_download_url
+
+        self.assertEqual(download_utils.authenticate(), "token-123")
+        self.assertEqual(
+            captured["post_body"],
+            "Username=user&Pw=pass",
+        )
+        self.assertEqual(captured["method"], "POST")
+        self.assertFalse(captured["authenticate"])
 
     def test_server_url_preserves_reverse_proxy_path(self) -> None:
         FakeAddon.settings.update(
