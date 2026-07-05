@@ -251,9 +251,11 @@ class WebSocketClient(threading.Thread):
             token,
             self.device_id,
         )
-        log.debug("websocket url: {0}", websocket_url)
+        log.debug(
+            "websocket url: {0}", downloadutils.redact_sensitive_data(websocket_url)
+        )
 
-        enableTrace(True)
+        enableTrace(False)
 
         self._client = WebSocketApp(
             websocket_url,

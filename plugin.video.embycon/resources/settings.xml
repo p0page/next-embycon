@@ -323,11 +323,6 @@
 					<default>true</default>
 					<control type="toggle"/>
 				</setting>
-				<setting id="changeUserOnScreenSaver" type="boolean" label="30330" help="">
-					<level>0</level>
-					<default>true</default>
-					<control type="toggle"/>
-				</setting>
 				<setting id="cacheImagesOnScreenSaver" type="boolean" label="30333" help="">
 					<level>0</level>
 					<default>false</default>

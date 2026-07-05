@@ -1149,3 +1149,43 @@ msgstr ""
 msgctxt "#30458"
 msgid "Are you sure you want to hide this item?"
 msgstr ""
+
+msgctxt "#30459"
+msgid "Continue Watching"
+msgstr ""
+
+msgctxt "#30460"
+msgid "Movies"
+msgstr ""
+
+msgctxt "#30461"
+msgid "TV Shows"
+msgstr ""
+
+msgctxt "#30462"
+msgid "Search"
+msgstr ""
+
+msgctxt "#30463"
+msgid "Discover"
+msgstr ""
+
+msgctxt "#30464"
+msgid "Settings & Tools"
+msgstr ""
+
+msgctxt "#30465"
+msgid "Favorites"
+msgstr ""
+
+msgctxt "#30466"
+msgid "Favorite Movies"
+msgstr ""
+
+msgctxt "#30467"
+msgid "Favorite TV Shows"
+msgstr ""
+
+msgctxt "#30468"
+msgid "Favorite Collections"
+msgstr ""

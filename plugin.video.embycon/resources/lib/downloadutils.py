@@ -275,7 +275,7 @@ class DownloadUtils:
             ],
         }
 
-        self.download_url(url, post_body=data, method="POST")
+        self.download_url(url, suppress=True, post_body=data, method="POST")
         log.debug("Posted Capabilities: {0}", data)
 
     @timer
@@ -1061,12 +1061,9 @@ class DownloadUtils:
 
             elif int(data.status) >= 400:
                 if int(data.status) == 401:
-                    window = HomeWindow()
-                    window.clear_property("AccessToken")
-                    log.error(
-                        "HTTP response error 401 auth error, clearing access token"
-                    )
                     if "AuthenticateByName" in url_path:
+                        window = HomeWindow()
+                        window.clear_property("AccessToken")
                         # Only a failed login proves the saved password is invalid.
                         m = hashlib.md5()
                         m.update(username.encode("utf-8"))
@@ -1077,6 +1074,16 @@ class DownloadUtils:
                         )
                         settings.setSetting(
                             "saved_user_password_" + hashed_username, ""
+                        )
+                    elif suppress is False:
+                        window = HomeWindow()
+                        window.clear_property("AccessToken")
+                        log.error(
+                            "HTTP response error 401 auth error, clearing access token"
+                        )
+                    else:
+                        log.error(
+                            "Suppressed HTTP 401 auth error; keeping playback token"
                         )
 
                 log.error("HTTP response error: {0} {1}", data.status, data.reason)

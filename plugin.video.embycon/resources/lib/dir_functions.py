@@ -98,6 +98,9 @@ def get_content(url: str, params: dict[str, str]) -> int:
     elif media_type == "season" or media_type == "episodes":
         view_type = "Episodes"
         content_type = "episodes"
+    elif media_type == "videos":
+        view_type = "Videos"
+        content_type = "videos"
     elif media_type == "playlists":
         view_type = "Playlists"
     elif media_type == "playlist":

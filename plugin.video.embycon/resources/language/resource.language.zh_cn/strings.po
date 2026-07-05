@@ -1146,3 +1146,43 @@ msgstr "确认"
 msgctxt "#30458"
 msgid "Are you sure you want to hide this item?"
 msgstr "您确定要隐藏此项目吗？"
+
+msgctxt "#30459"
+msgid "Continue Watching"
+msgstr "继续观看"
+
+msgctxt "#30460"
+msgid "Movies"
+msgstr "电影"
+
+msgctxt "#30461"
+msgid "TV Shows"
+msgstr "剧集"
+
+msgctxt "#30462"
+msgid "Search"
+msgstr "搜索"
+
+msgctxt "#30463"
+msgid "Discover"
+msgstr "发现"
+
+msgctxt "#30464"
+msgid "Settings & Tools"
+msgstr "设置与工具"
+
+msgctxt "#30465"
+msgid "Favorites"
+msgstr "收藏"
+
+msgctxt "#30466"
+msgid "Favorite Movies"
+msgstr "收藏电影"
+
+msgctxt "#30467"
+msgid "Favorite TV Shows"
+msgstr "收藏剧集"
+
+msgctxt "#30468"
+msgid "Favorite Collections"
+msgstr "收藏合集"

@@ -43,6 +43,54 @@ log = SimpleLogging(__name__)
 WATCHED_MARK_PERCENTAGE = 90
 
 
+def _safe_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _video_stream_quality(media_source: dict) -> tuple[int, int]:
+    video_bitrate = 0
+    pixel_count = 0
+
+    for stream in media_source.get("MediaStreams") or []:
+        if stream.get("Type") != "Video":
+            continue
+
+        video_bitrate = max(
+            video_bitrate,
+            _safe_int(stream.get("BitRate") or stream.get("Bitrate")),
+        )
+        pixel_count = max(
+            pixel_count,
+            _safe_int(stream.get("Width")) * _safe_int(stream.get("Height")),
+        )
+
+    return video_bitrate, pixel_count
+
+
+def _media_source_quality_key(media_source: dict) -> tuple[int, int, int, int]:
+    source_bitrate = _safe_int(
+        media_source.get("Bitrate") or media_source.get("BitRate")
+    )
+    video_bitrate, pixel_count = _video_stream_quality(media_source)
+    return (
+        source_bitrate,
+        video_bitrate,
+        pixel_count,
+        _safe_int(media_source.get("Size")),
+    )
+
+
+def sort_media_sources_by_quality(media_sources: list[dict]) -> list[dict]:
+    return sorted(media_sources, key=_media_source_quality_key, reverse=True)
+
+
+def apply_resume_jump_back(seek_time: float, jump_back_amount: int) -> float:
+    return max(0, seek_time - jump_back_amount)
+
+
 def play_all_files(
     items: list,
     auto_resume: str,
@@ -531,6 +579,8 @@ def play_file(
         log.debug("Play Failed! There is no MediaSources data!")
         return None
 
+    media_sources = sort_media_sources_by_quality(media_sources)
+
     if len(media_sources) == 1 or auto_play_first_version:
         selected_media_source = media_sources[0]
 
@@ -770,8 +820,8 @@ def play_file(
 
         log.info("PlaybackResumeAction : Playback is Running")
 
-        seek_to_time = seek_time - jump_back_amount
-        target_seek = seek_to_time - 10
+        seek_to_time = apply_resume_jump_back(seek_time, jump_back_amount)
+        target_seek = max(0, seek_to_time - 10)
 
         count = 0
         max_loops = 2 * 120
@@ -1407,7 +1457,7 @@ def send_progress(monitor: PlaybackMonitorService) -> None:
     log.debug("Sending POST progress started: {0}", postdata)
     url = "{server}/emby/Sessions/Playing/Progress"
     download_utils = DownloadUtils()
-    download_utils.download_url(url, post_body=postdata, method="POST")
+    download_utils.download_url(url, suppress=True, post_body=postdata, method="POST")
 
 
 def get_volume() -> tuple[int | None, bool | None]:
@@ -1557,7 +1607,9 @@ def stop_all_playback(played_information: dict[str, dict]) -> None:
                     "PlaySessionId": play_session_id,
                     "LiveStreamId": live_stream_id,
                 }
-                download_utils.download_url(url, post_body=postdata, method="POST")
+                download_utils.download_url(
+                    url, suppress=True, post_body=postdata, method="POST"
+                )
                 data["currently_playing"] = False
 
                 if data.get("play_action_type", "") == "play":
@@ -1667,7 +1719,7 @@ class PlaybackMonitorService(xbmc.Player):
 
         url = "{server}/emby/Sessions/Playing"
         download_utils = DownloadUtils()
-        download_utils.download_url(url, post_body=postdata, method="POST")
+        download_utils.download_url(url, suppress=True, post_body=postdata, method="POST")
 
         home_screen = HomeWindow()
         home_screen.set_property("currently_playing_id", str(emby_item_id))
@@ -1803,21 +1855,32 @@ class MonitoringService(xbmc.Monitor):
         log.debug("Screen Saver Activated")
 
         home_screen = HomeWindow()
-        home_screen.clear_property("skip_select_user")
+        player = xbmc.Player()
+        play_data = None
+        if player.isPlayingVideo():
+            play_data = get_playing_data(self.play_monitor.played_information)
+
+        if play_data:
+            home_screen.set_property("skip_select_user", "true")
+        else:
+            home_screen.clear_property("skip_select_user")
 
         settings = xbmcaddon.Addon()
         stop_playback = settings.getSetting("stopPlaybackOnScreensaver") == "true"
 
         if stop_playback:
-            player = xbmc.Player()
             if player.isPlayingVideo():
                 log.debug("Screen Saver Activated : isPlayingVideo() = true")
-                play_data = get_playing_data(self.play_monitor.played_information)
                 if play_data:
-                    log.debug(
-                        "Screen Saver Activated : this is an EmbyCon item so stop it"
-                    )
-                    player.stop()
+                    if xbmc.getCondVisibility("Player.Paused"):
+                        log.debug(
+                            "Screen Saver Activated : EmbyCon playback is paused, keeping playback active"
+                        )
+                    else:
+                        log.debug(
+                            "Screen Saver Activated : this is an EmbyCon item so stop it"
+                        )
+                        player.stop()
 
         # xbmc.executebuiltin("Dialog.Close(selectdialog, true)")
 
@@ -1834,12 +1897,3 @@ class MonitoringService(xbmc.Monitor):
         if self.background_image_cache_thread:
             self.background_image_cache_thread.stop_activity()
             self.background_image_cache_thread = None
-
-        settings = xbmcaddon.Addon()
-        show_change_user = settings.getSetting("changeUserOnScreenSaver") == "true"
-        if show_change_user:
-            home_screen = HomeWindow()
-            skip_select_user = home_screen.get_property("skip_select_user")
-            if skip_select_user is not None and skip_select_user == "true":
-                return
-            xbmc.executebuiltin("RunScript(plugin.video.embycon,0,?mode=CHANGE_USER)")

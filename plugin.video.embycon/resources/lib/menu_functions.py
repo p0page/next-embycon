@@ -811,19 +811,35 @@ def display_main_menu() -> None:
     xbmcplugin.setContent(handle, "files")
 
     add_menu_directory_item(
+        string_load(30459),
+        get_continue_watching_url(),
+    )
+    add_menu_directory_item(
+        string_load(30460),
+        "plugin://plugin.video.embycon/?mode=SHOW_ADDON_MENU&type=global_list_movies",
+    )
+    add_menu_directory_item(
+        string_load(30461),
+        "plugin://plugin.video.embycon/?mode=SHOW_ADDON_MENU&type=global_list_tvshows",
+    )
+    add_menu_directory_item(
+        string_load(30465),
+        "plugin://plugin.video.embycon/?mode=SHOW_ADDON_MENU&type=favorites",
+    )
+    add_menu_directory_item(
         string_load(30406),
         "plugin://plugin.video.embycon/?mode=SHOW_ADDON_MENU&type=library",
     )
     add_menu_directory_item(
-        string_load(30407),
-        "plugin://plugin.video.embycon/?mode=SHOW_ADDON_MENU&type=show_global_types",
-    )
-    add_menu_directory_item(
-        string_load(30408),
+        string_load(30463),
         "plugin://plugin.video.embycon/?mode=SHOW_ADDON_MENU&type=show_custom_widgets",
     )
     add_menu_directory_item(
-        string_load(30409),
+        string_load(30462),
+        "plugin://plugin.video.embycon/?mode=SEARCH",
+    )
+    add_menu_directory_item(
+        string_load(30464),
         "plugin://plugin.video.embycon/?mode=SHOW_ADDON_MENU&type=addon_items",
     )
     add_menu_directory_item(
@@ -832,6 +848,23 @@ def display_main_menu() -> None:
     )
 
     xbmcplugin.endOfDirectory(handle)
+
+
+def get_continue_watching_url() -> str:
+    params: dict[str, object] = {}
+    params["Recursive"] = True
+    params["Limit"] = "{ItemLimit}"
+    params["Fields"] = "{field_filters}"
+    params["ImageTypeLimit"] = 1
+    params["EnableUserData"] = True
+
+    path = get_emby_url("{server}/emby/Users/{userid}/Items/Resume", params)
+    return (
+        sys.argv[0]
+        + "?url="
+        + urllib.parse.quote(path)
+        + "&mode=GET_CONTENT&media_type=videos&sort=none"
+    )
 
 
 def display_menu(params: dict[str, str]) -> None:
@@ -846,6 +879,8 @@ def display_menu(params: dict[str, str]) -> None:
         display_movies_type(params, {})
     elif menu_type == "global_list_tvshows":
         display_tvshow_type(params, {})
+    elif menu_type == "favorites":
+        display_favorites_menu(params)
     elif menu_type == "show_custom_widgets":
         show_widgets()
     elif menu_type == "addon_items":
@@ -941,6 +976,59 @@ def show_global_types(_params: dict[str, str]) -> None:
     add_menu_directory_item(
         string_load(30261),
         "plugin://plugin.video.embycon/?mode=SHOW_ADDON_MENU&type=global_list_tvshows",
+    )
+
+    xbmcplugin.endOfDirectory(handle)
+
+
+def get_favorite_content_url(
+    include_item_types: str,
+    media_type: str,
+    extra_params: dict[str, object] | None = None,
+) -> str:
+    params: dict[str, object] = {}
+    params["IncludeItemTypes"] = include_item_types
+    params["Recursive"] = True
+    params["IsMissing"] = False
+    params["Fields"] = "{field_filters}"
+    params["ImageTypeLimit"] = 1
+    params["Filters"] = "IsFavorite"
+
+    if extra_params:
+        params.update(extra_params)
+
+    path = get_emby_url("{server}/emby/Users/{userid}/Items", params)
+    return (
+        sys.argv[0]
+        + "?url="
+        + urllib.parse.quote(path)
+        + "&mode=GET_CONTENT&media_type="
+        + media_type
+    )
+
+
+def display_favorites_menu(_params: dict[str, str]) -> None:
+    handle = int(sys.argv[1])
+    xbmcplugin.setContent(handle, "files")
+
+    add_menu_directory_item(
+        string_load(30466),
+        get_favorite_content_url(
+            "Movie",
+            "movies",
+            {
+                "CollapseBoxSetItems": False,
+                "GroupItemsIntoCollections": False,
+            },
+        ),
+    )
+    add_menu_directory_item(
+        string_load(30467),
+        get_favorite_content_url("Series", "tvshows"),
+    )
+    add_menu_directory_item(
+        string_load(30468),
+        get_favorite_content_url("Boxset", "boxsets"),
     )
 
     xbmcplugin.endOfDirectory(handle)
@@ -1808,7 +1896,7 @@ def set_library_window_values(force: bool = False) -> None:
 
     data_manager = DataManager()
     url = "{server}/emby/Users/{userid}/Views"
-    result = data_manager.get_content(url)
+    result = data_manager.get_content(url, suppress=True)
 
     if result is None:
         return

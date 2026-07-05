@@ -1078,3 +1078,43 @@ msgstr "Reproducir siguiente"
 msgctxt "#30448"
 msgid "Force transcode av1"
 msgstr "Forzar transcodificación av1"
+
+msgctxt "#30459"
+msgid "Continue Watching"
+msgstr "Continuar viendo"
+
+msgctxt "#30460"
+msgid "Movies"
+msgstr "Peliculas"
+
+msgctxt "#30461"
+msgid "TV Shows"
+msgstr "Series TV"
+
+msgctxt "#30462"
+msgid "Search"
+msgstr "Buscar"
+
+msgctxt "#30463"
+msgid "Discover"
+msgstr "Descubrir"
+
+msgctxt "#30464"
+msgid "Settings & Tools"
+msgstr "Ajustes y herramientas"
+
+msgctxt "#30465"
+msgid "Favorites"
+msgstr "Favoritos"
+
+msgctxt "#30466"
+msgid "Favorite Movies"
+msgstr "Peliculas favoritas"
+
+msgctxt "#30467"
+msgid "Favorite TV Shows"
+msgstr "Series favoritas"
+
+msgctxt "#30468"
+msgid "Favorite Collections"
+msgstr "Colecciones favoritas"

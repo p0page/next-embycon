@@ -134,12 +134,12 @@ class DataManager:
         return json.loads(json_data, object_hook=lambda d: defaultdict(lambda: None, d))
 
     @timer
-    def get_content(self, url: str | None) -> dict:
+    def get_content(self, url: str | None, suppress: bool = False) -> dict:
         if not url:
             raise ValueError("URL cannot be None or empty")
         du = DownloadUtils()
         du.set_host_domain()
-        json_data = du.download_url(url)
+        json_data = du.download_url(url, suppress=suppress)
         return self.load_json_data(json_data)
 
     def get_cache_filename(self, url: str) -> str:
