@@ -23,8 +23,10 @@ from .clientinfo import ClientInformation
 from .simple_logging import SimpleLogging
 from .translation import string_load
 from .tracking import timer
+from .optional_features import FEATURE_CAPABILITIES, optional_feature_registry
 
 log = SimpleLogging(__name__)
+OPTIONAL_FEATURE_UNSUPPORTED_TTL_SECONDS = 24 * 60 * 60
 
 SENSITIVE_LOG_KEYS = {
     "access_token",
@@ -229,11 +231,24 @@ class DownloadUtils:
         if hasattr(self, "_initialized"):
             return
         self._initialized = True
-
         self.set_host_domain()
 
     @timer
     def post_capabilities(self) -> None:
+        feature_scope = self.get_optional_feature_scope()
+        if not optional_feature_registry.is_supported(
+            FEATURE_CAPABILITIES, scope=feature_scope
+        ):
+            log.debug(
+                "Skipping capabilities post; endpoint temporarily unsupported for {0}s",
+                int(
+                    optional_feature_registry.seconds_until_retry(
+                        FEATURE_CAPABILITIES, scope=feature_scope
+                    )
+                ),
+            )
+            return
+
         url = "{server}/emby/Sessions/Capabilities/Full?format=json"
         data = {
             "SupportsMediaControl": True,
@@ -274,8 +289,28 @@ class DownloadUtils:
             ],
         }
 
-        self.download_url(url, suppress=True, post_body=data, method="POST")
+        status_out: dict[str, object] = {}
+        self.download_url(
+            url,
+            suppress=True,
+            post_body=data,
+            method="POST",
+            log_http_errors=False,
+            status_out=status_out,
+        )
+        if status_out.get("status") == 404:
+            optional_feature_registry.mark_unsupported(
+                FEATURE_CAPABILITIES,
+                OPTIONAL_FEATURE_UNSUPPORTED_TTL_SECONDS,
+                scope=feature_scope,
+            )
+            log.debug("Capabilities endpoint returned 404; temporarily disabled")
         log.debug("Posted Capabilities: {0}", data)
+
+    def get_optional_feature_scope(self) -> str:
+        server = self.get_server() or ""
+        user_id = HomeWindow().get_property("userid")
+        return "%s|%s" % (server, user_id)
 
     @timer
     def get_item_playback_info(self, item_id: str, force_transcode: bool) -> dict:
@@ -910,10 +945,14 @@ class DownloadUtils:
         method: str = "GET",
         authenticate: bool = True,
         headers: dict[str, str] | None = None,
+        log_http_errors: bool = True,
+        status_out: dict[str, object] | None = None,
     ) -> str:
         log.debug("DownloadUrl : {0}", redact_sensitive_data(url))
 
         return_data = "null"
+        if status_out is not None:
+            status_out.clear()
         settings = xbmcaddon.Addon()
         user_details = load_user_details(settings)
         username = user_details.get("username", "")
@@ -1037,6 +1076,9 @@ class DownloadUtils:
                 conn.request(method=method, url=url_path, headers=head)
 
             data = conn.getresponse()
+            if status_out is not None:
+                status_out["status"] = int(data.status)
+                status_out["reason"] = str(data.reason)
             log.debug("HTTP response: {0} {1}", data.status, data.reason)
             log.debug("GET URL HEADERS: {0}", redact_sensitive_data(data.getheaders()))
 
@@ -1085,7 +1127,11 @@ class DownloadUtils:
                             "Suppressed HTTP 401 auth error; keeping playback token"
                         )
 
-                log.error("HTTP response error: {0} {1}", data.status, data.reason)
+                log_message = "HTTP response error: {0} {1}"
+                if log_http_errors:
+                    log.error(log_message, data.status, data.reason)
+                else:
+                    log.debug(log_message, data.status, data.reason)
                 if suppress is False:
                     xbmcgui.Dialog().notification(
                         string_load(30316),
@@ -1094,7 +1140,11 @@ class DownloadUtils:
                     )
 
         except Exception as msg:
-            log.error("Unable to connect to {0} : {1}", server, msg)
+            log_message = "Unable to connect to {0} : {1}"
+            if log_http_errors:
+                log.error(log_message, server, msg)
+            else:
+                log.debug(log_message, server, msg)
             if suppress is False:
                 xbmcgui.Dialog().notification(
                     string_load(30316),

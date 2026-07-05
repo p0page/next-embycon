@@ -17,8 +17,10 @@ from .jsonrpc import JsonRpc
 from .kodi_utils import HomeWindow
 from .websocket import WebSocketApp, enableTrace
 from .library_change_monitor import LibraryChangeMonitor
+from .optional_features import FEATURE_WEBSOCKET, optional_feature_registry
 
 log = SimpleLogging(__name__)
+OPTIONAL_FEATURE_UNSUPPORTED_TTL_SECONDS = 24 * 60 * 60
 
 
 class WebSocketClient(threading.Thread):
@@ -26,11 +28,16 @@ class WebSocketClient(threading.Thread):
 
     _client = None
     _stop_websocket: bool = False
+    _websocket_unsupported: bool = False
+    _optional_feature_scope: str = ""
     _library_monitor: LibraryChangeMonitor | None = None
 
     def __init__(self, library_change_monitor: LibraryChangeMonitor) -> None:
         self.__dict__ = self._shared_state
         self.monitor = xbmc.Monitor()
+        self._stop_websocket = False
+        self._websocket_unsupported = False
+        self._optional_feature_scope = ""
 
         self.client_info = clientinfo.ClientInformation()
         self.device_id = self.client_info.get_device_id()
@@ -221,11 +228,42 @@ class WebSocketClient(threading.Thread):
         self.post_capabilities()
 
     def on_error(self, error: Exception) -> None:
-        log.error("Error: {0}", error)
+        error_text = str(error)
+        if "Handshake status 404" in error_text or "404 Not Found" in error_text:
+            log.debug(
+                "WebSocket endpoint is not available; remote control disabled: {0}",
+                error_text,
+            )
+            optional_feature_registry.mark_unsupported(
+                FEATURE_WEBSOCKET,
+                OPTIONAL_FEATURE_UNSUPPORTED_TTL_SECONDS,
+                scope=self._get_optional_feature_scope(),
+            )
+            self._websocket_unsupported = True
+            self._stop_websocket = True
+            if self._client is not None:
+                self._client.close()
+            return
+
+        log.error("Error: {0}", error_text)
 
     def run(self) -> None:
         # websocket.enableTrace(True)
         download_utils = downloadutils.DownloadUtils()
+        download_utils.set_host_domain()
+        self._optional_feature_scope = self._get_optional_feature_scope(download_utils)
+        if not optional_feature_registry.is_supported(
+            FEATURE_WEBSOCKET, scope=self._optional_feature_scope
+        ):
+            log.debug(
+                "Skipping WebSocket; endpoint temporarily unsupported for {0}s",
+                int(
+                    optional_feature_registry.seconds_until_retry(
+                        FEATURE_WEBSOCKET, scope=self._optional_feature_scope
+                    )
+                ),
+            )
+            return
 
         token = None
         while token is None or token == "":
@@ -276,6 +314,9 @@ class WebSocketClient(threading.Thread):
                 # Abort was requested, exit
                 break
 
+            if self._websocket_unsupported:
+                break
+
             log.debug("Reconnecting WebSocket")
 
         log.debug("WebSocketClient Stopped")
@@ -289,3 +330,16 @@ class WebSocketClient(threading.Thread):
     def post_capabilities(self) -> None:
         download_utils = downloadutils.DownloadUtils()
         download_utils.post_capabilities()
+
+    def _get_optional_feature_scope(
+        self, download_utils_instance=None
+    ) -> str:
+        if self._optional_feature_scope:
+            return self._optional_feature_scope
+
+        if download_utils_instance is None:
+            download_utils_instance = downloadutils.DownloadUtils()
+
+        server = download_utils_instance.get_server() or ""
+        user_id = HomeWindow().get_property("userid")
+        return "%s|%s" % (server, user_id)

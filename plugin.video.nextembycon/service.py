@@ -13,7 +13,7 @@ from resources.lib.simple_logging import SimpleLogging
 from resources.lib.play_utils import (
     PlaybackMonitorService,
     MonitoringService,
-    send_progress,
+    queue_progress,
 )
 from resources.lib.kodi_utils import HomeWindow
 from resources.lib.widgets import set_background_image, set_random_movies
@@ -26,6 +26,8 @@ from resources.lib.tracking import set_timing_enabled
 from resources.lib.image_server import HttpImageServerThread
 from resources.lib.playnext import PlayNextService
 from resources.lib.chapter_dialog import ChapterDialogMonitor
+from resources.lib.background_scheduler import BackgroundScheduler, ScheduledTask
+from resources.lib.runtime_state import RuntimeState
 
 settings = xbmcaddon.Addon()
 
@@ -93,12 +95,13 @@ play_monitor_service: PlaybackMonitorService = PlaybackMonitorService()
 monitor_service: MonitoringService = MonitoringService(play_monitor_service)
 
 home_window = HomeWindow()
-last_progress_update = time.time()
-last_background_update = 0
-last_random_movie_update = 0
+service_started_at = time.time()
+last_progress_update = service_started_at
+last_playback_stopped_at = None
+was_playing = False
 skin_checked = False
 skin_check_delay = 20
-user_last_changed = time.time()
+user_last_changed = service_started_at
 
 # start the library update monitor
 library_change_monitor = LibraryChangeMonitor()
@@ -136,64 +139,99 @@ random_movie_list_interval = random_movie_list_interval * 60
 
 prev_user_id = home_window.get_property("userid")
 
+background_scheduler = BackgroundScheduler()
+background_refresh_flags = {"user_changed": False}
+
+
+def run_background_refresh(state: RuntimeState) -> None:
+    user_changed = background_refresh_flags["user_changed"] or state.is_user_changed
+    set_library_window_values(user_changed)
+    set_background_image(user_changed)
+    if user_changed:
+        background_refresh_flags["user_changed"] = False
+
+background_scheduler.add_task(
+    ScheduledTask(
+        name="random_movies",
+        interval=float(random_movie_list_interval),
+        run=lambda state: set_random_movies(),
+        startup_delay=15.0,
+        failure_backoff=60.0,
+    )
+)
+
+background_scheduler.add_task(
+    ScheduledTask(
+        name="background_image",
+        interval=float(background_interval),
+        run=run_background_refresh,
+        startup_delay=15.0,
+        failure_backoff=60.0,
+    )
+)
+
+background_scheduler.add_task(
+    ScheduledTask(
+        name="screensaver_background_image",
+        interval=float(background_interval),
+        run=lambda state: set_background_image(False),
+        allow_during_screensaver=True,
+        should_run=lambda state: state.screensaver_active,
+        startup_delay=15.0,
+        failure_backoff=60.0,
+    )
+)
+
 while not kodi_monitor.abortRequested():
     try:
-        if xbmc.Player().isPlaying():
-            last_random_movie_update = time.time() - (random_movie_list_interval - 15)
+        now = time.time()
+        is_playing = xbmc.Player().isPlaying()
+        if was_playing and not is_playing:
+            last_playback_stopped_at = now
+        was_playing = is_playing
+
+        screen_saver_active = xbmc.getCondVisibility("System.ScreenSaverActive")
+        current_user_id = home_window.get_property("userid")
+        runtime_state = RuntimeState(
+            now=now,
+            is_playing=is_playing,
+            screensaver_active=screen_saver_active,
+            abort_requested=kodi_monitor.abortRequested(),
+            user_id=current_user_id,
+            previous_user_id=prev_user_id,
+            service_started_at=service_started_at,
+            last_playback_stopped_at=last_playback_stopped_at,
+        )
+
+        if runtime_state.is_playback_active:
             # if playing every 10 seconds updated the server with progress
-            if (time.time() - last_progress_update) > 10:
-                last_progress_update = time.time()
-                send_progress(play_monitor_service)
+            if (now - last_progress_update) > 10:
+                last_progress_update = now
+                queue_progress(play_monitor_service)
 
         else:
-            screen_saver_active = xbmc.getCondVisibility("System.ScreenSaverActive")
+            if runtime_state.can_consume_user_change:
+                log.debug("user_change_detected")
+                prev_user_id = current_user_id
+                user_last_changed = now
+                background_refresh_flags["user_changed"] = True
+                background_scheduler.mark_pending("random_movies")
+                background_scheduler.mark_pending("background_image")
 
-            if not screen_saver_active:
-                user_changed = False
-                if prev_user_id != home_window.get_property("userid"):
-                    log.debug("user_change_detected")
-                    prev_user_id = home_window.get_property("userid")
-                    user_changed = True
-                    user_last_changed = time.time()
-
-                if user_changed or (
-                    random_movie_list_interval != 0
-                    and (time.time() - last_random_movie_update)
-                    > random_movie_list_interval
-                ):
-                    last_random_movie_update = time.time()
-                    set_random_movies()
-
-                if user_changed or (
-                    background_interval != 0
-                    and (time.time() - last_background_update) > background_interval
-                ):
-                    last_background_update = time.time()
-                    set_library_window_values(user_changed)
-                    set_background_image(user_changed)
-
-                if remote_control and user_changed:
+                if remote_control:
                     websocket_client.stop_client()
                     websocket_client = WebSocketClient(library_change_monitor)
                     websocket_client.start()
 
-                if (
-                    skin_checked is False
-                    and (time.time() - user_last_changed) > skin_check_delay
-                    and home_window.get_property("userid")
-                ):
-                    skin_checked = True
-                    # check_skin_installed()
+            background_scheduler.tick(runtime_state)
 
-            elif screen_saver_active:
-                last_random_movie_update = time.time() - (
-                    random_movie_list_interval - 15
-                )
-                if background_interval != 0 and (
-                    (time.time() - last_background_update) > background_interval
-                ):
-                    last_background_update = time.time()
-                    set_background_image(False)
+            if (
+                skin_checked is False
+                and (now - user_last_changed) > skin_check_delay
+                and home_window.get_property("userid")
+            ):
+                skin_checked = True
+                # check_skin_installed()
 
     except Exception as error:
         log.error("Exception in Playback Monitor: {0}", error)

@@ -22,4 +22,4 @@ class AddonMetadataTests(unittest.TestCase):
     def test_next_embycon_metadata_uses_independent_addon_id(self) -> None:
         self.assertEqual(_addon_attribute("id"), "plugin.video.nextembycon")
         self.assertEqual(_addon_attribute("name"), "Next EmbyCon")
-        self.assertEqual(_addon_attribute("version"), "0.1.0")
+        self.assertEqual(_addon_attribute("version"), "0.2.0")

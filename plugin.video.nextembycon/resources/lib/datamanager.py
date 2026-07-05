@@ -373,9 +373,19 @@ class CacheManagerThread(threading.Thread):
                             self.cached_item, handle, protocol=pickle.HIGHEST_PROTOCOL
                         )
 
-                log.debug("CacheManagerThread : Sending container refresh")
-                time.sleep(1)
-                xbmc.executebuiltin("Container.Refresh")
+                try:
+                    is_playing = xbmc.Player().isPlaying()
+                except Exception:
+                    is_playing = False
+
+                if is_playing:
+                    log.debug(
+                        "CacheManagerThread : Skipping container refresh during playback"
+                    )
+                else:
+                    log.debug("CacheManagerThread : Sending container refresh")
+                    time.sleep(1)
+                    xbmc.executebuiltin("Container.Refresh")
 
             else:
                 self.cached_item.date_last_used = time.time()

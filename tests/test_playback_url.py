@@ -5,6 +5,8 @@ import types
 import unittest
 import base64
 import hashlib
+import tempfile
+import threading
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -99,6 +101,8 @@ class FakePlaybackDownloadUtils:
         method: str = "GET",
         authenticate: bool = True,
         headers: dict[str, str] | None = None,
+        log_http_errors: bool = True,
+        status_out: dict[str, object] | None = None,
     ) -> str:
         self.calls.append(
             {
@@ -108,6 +112,8 @@ class FakePlaybackDownloadUtils:
                 "method": method,
                 "authenticate": authenticate,
                 "headers": headers,
+                "log_http_errors": log_http_errors,
+                "status_out": status_out,
             }
         )
         return "null"
@@ -293,11 +299,17 @@ install_kodi_stubs()
 from resources.lib.downloadutils import DownloadUtils  # noqa: E402
 from resources.lib import downloadutils as downloadutils_module  # noqa: E402
 from resources.lib import datamanager  # noqa: E402
+from resources.lib import library_change_monitor  # noqa: E402
 from resources.lib import play_utils  # noqa: E402
 from resources.lib import menu_functions  # noqa: E402
 from resources.lib import websocket_client  # noqa: E402
 from resources.lib import utils  # noqa: E402
 from resources.lib import server_detect  # noqa: E402
+from resources.lib.optional_features import (  # noqa: E402
+    FEATURE_CAPABILITIES,
+    FEATURE_WEBSOCKET,
+    OptionalFeatureRegistry,
+)
 
 
 class PlaybackUrlTests(unittest.TestCase):
@@ -325,6 +337,8 @@ class PlaybackUrlTests(unittest.TestCase):
             method: str = "GET",
             authenticate: bool = True,
             headers: dict[str, str] | None = None,
+            log_http_errors: bool = True,
+            status_out: dict[str, object] | None = None,
         ) -> str:
             if "AuthenticateByName" in url:
                 captured["url"] = url
@@ -660,9 +674,28 @@ class DownloadUrlTests(unittest.TestCase):
 class SessionTelemetryTests(unittest.TestCase):
     def setUp(self) -> None:
         FakePlaybackDownloadUtils.calls = []
+        FakeAddon.settings = {
+            **FakeAddon.settings,
+            "protocol": "1",
+            "verify_cert": "true",
+            "ipaddress": "media.example.test",
+            "port": "443",
+        }
+        FakeHomeWindow.props = {"userid": "user-id", "userimage": "DefaultUser.png"}
         DownloadUtils._instance = None
         downloadutils_module.HomeWindow = FakeHomeWindow
         downloadutils_module.ClientInformation = FakeClientInformation
+        self.optional_registry = OptionalFeatureRegistry(now=lambda: 100.0)
+        self.original_optional_registry = getattr(
+            downloadutils_module, "optional_feature_registry", None
+        )
+        downloadutils_module.optional_feature_registry = self.optional_registry
+
+    def tearDown(self) -> None:
+        if self.original_optional_registry is None:
+            delattr(downloadutils_module, "optional_feature_registry")
+        else:
+            downloadutils_module.optional_feature_registry = self.original_optional_registry
 
     def test_post_capabilities_suppresses_unsupported_session_endpoint_errors(
         self,
@@ -677,6 +710,8 @@ class SessionTelemetryTests(unittest.TestCase):
             method: str = "GET",
             authenticate: bool = True,
             headers: dict[str, str] | None = None,
+            log_http_errors: bool = True,
+            status_out: dict[str, object] | None = None,
         ) -> str:
             calls.append(
                 {
@@ -686,6 +721,8 @@ class SessionTelemetryTests(unittest.TestCase):
                     "method": method,
                     "authenticate": authenticate,
                     "headers": headers,
+                    "log_http_errors": log_http_errors,
+                    "status_out": status_out,
                 }
             )
             return "null"
@@ -697,10 +734,91 @@ class SessionTelemetryTests(unittest.TestCase):
         self.assertEqual(calls[0]["url"], "{server}/emby/Sessions/Capabilities/Full?format=json")
         self.assertEqual(calls[0]["method"], "POST")
         self.assertTrue(calls[0]["suppress"])
+        self.assertFalse(calls[0]["log_http_errors"])
         self.assertNotIn("IconUrl", calls[0]["post_body"])
         self.assertTrue(calls[0]["post_body"]["SupportsMediaControl"])
         self.assertEqual(calls[0]["post_body"]["PlayableMediaTypes"], ["Video", "Audio"])
         self.assertIn("PlayMediaSource", calls[0]["post_body"]["SupportedCommands"])
+
+    def test_post_capabilities_skips_when_feature_is_temporarily_unsupported(
+        self,
+    ) -> None:
+        download_utils = DownloadUtils()
+        calls = []
+        capabilities_scope = download_utils.get_optional_feature_scope()
+        self.optional_registry.mark_unsupported(
+            FEATURE_CAPABILITIES,
+            ttl_seconds=60.0,
+            scope=capabilities_scope,
+        )
+
+        def fake_download_url(*args, **kwargs) -> str:
+            calls.append({"args": args, "kwargs": kwargs})
+            return "null"
+
+        download_utils.download_url = fake_download_url
+
+        download_utils.post_capabilities()
+
+        self.assertEqual(calls, [])
+
+    def test_post_capabilities_does_not_disable_feature_for_204_success(self) -> None:
+        download_utils = DownloadUtils()
+        capabilities_scope = download_utils.get_optional_feature_scope()
+
+        def fake_download_url(*args, **kwargs) -> str:
+            kwargs["status_out"]["status"] = 204
+            return "null"
+
+        download_utils.download_url = fake_download_url
+
+        download_utils.post_capabilities()
+
+        self.assertTrue(
+            self.optional_registry.is_supported(
+                FEATURE_CAPABILITIES,
+                scope=capabilities_scope,
+            )
+        )
+
+    def test_post_capabilities_uses_request_scoped_status(self) -> None:
+        download_utils = DownloadUtils()
+        capabilities_scope = download_utils.get_optional_feature_scope()
+        download_utils.last_status_code = 404
+
+        def fake_download_url(*args, **kwargs) -> str:
+            kwargs["status_out"]["status"] = 204
+            return "null"
+
+        download_utils.download_url = fake_download_url
+
+        download_utils.post_capabilities()
+
+        self.assertTrue(
+            self.optional_registry.is_supported(
+                FEATURE_CAPABILITIES,
+                scope=capabilities_scope,
+            )
+        )
+
+    def test_post_capabilities_marks_404_as_temporarily_unsupported(self) -> None:
+        download_utils = DownloadUtils()
+        capabilities_scope = download_utils.get_optional_feature_scope()
+
+        def fake_download_url(*args, **kwargs) -> str:
+            kwargs["status_out"]["status"] = 404
+            return "null"
+
+        download_utils.download_url = fake_download_url
+
+        download_utils.post_capabilities()
+
+        self.assertFalse(
+            self.optional_registry.is_supported(
+                FEATURE_CAPABILITIES,
+                scope=capabilities_scope,
+            )
+        )
 
     def test_playback_session_updates_are_suppressed(self) -> None:
         class FakePlayer:
@@ -829,6 +947,149 @@ class BackgroundRequestTests(unittest.TestCase):
             [{"url": "{server}/emby/Users/{userid}/Views", "suppress": True}],
         )
 
+    def test_cache_refresh_does_not_refresh_container_while_playing(self) -> None:
+        def cached_item_info(name: str):
+            return types.SimpleNamespace(
+                name=name,
+                play_count=0,
+                favorite=False,
+                resume_time=0,
+                recursive_unplayed_items_count=0,
+                etag=name,
+            )
+
+        class PlayingPlayer:
+            def isPlaying(self) -> bool:
+                return True
+
+        original_data_manager = datamanager.DataManager
+        original_extract_item_info = datamanager.extract_item_info
+        original_player = datamanager.xbmc.Player
+        original_execute_builtin = datamanager.xbmc.executebuiltin
+        executed_commands: list[str] = []
+
+        class FakeDataManager:
+            def get_content(self, url: str):
+                self.seen_url = url
+                return {"Items": [{"Name": "new"}]}
+
+        datamanager.DataManager = FakeDataManager
+        datamanager.extract_item_info = (
+            lambda item, gui_options, download_utils=None: cached_item_info(item["Name"])
+        )
+        datamanager.xbmc.Player = lambda: PlayingPlayer()
+        datamanager.xbmc.executebuiltin = lambda command: executed_commands.append(
+            command
+        )
+
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                cache_path = str(Path(temp_dir) / "cache.pickle")
+                cached_item = datamanager.CacheItem()
+                cached_item.item_list = [cached_item_info("old")]
+                cached_item.item_list_hash = datamanager.CacheManagerThread.get_data_hash(
+                    cached_item.item_list
+                )
+                cached_item.date_saved = 0
+                cached_item.last_action = "fresh_data"
+                cached_item.items_url = "{server}/items"
+                cached_item.file_path = cache_path
+                cached_item.total_records = 1
+
+                cache_thread = datamanager.CacheManagerThread()
+                cache_thread.cached_item = cached_item
+                cache_thread.gui_options = object()
+                cache_thread.run()
+        finally:
+            datamanager.DataManager = original_data_manager
+            datamanager.extract_item_info = original_extract_item_info
+            datamanager.xbmc.Player = original_player
+            datamanager.xbmc.executebuiltin = original_execute_builtin
+
+        self.assertNotIn("Container.Refresh", executed_commands)
+
+
+class ProgressReporterTests(unittest.TestCase):
+    def test_progress_reporter_runs_sender_asynchronously(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+        calls: list[object] = []
+
+        def sender(monitor: object) -> None:
+            calls.append(monitor)
+            started.set()
+            release.wait(2)
+
+        reporter = play_utils.ProgressUpdateQueue(sender=sender)
+        monitor = object()
+
+        reporter.submit(monitor)
+
+        self.assertTrue(started.wait(1))
+        self.assertEqual(calls, [monitor])
+        release.set()
+        self.assertTrue(reporter.join(2))
+
+    def test_progress_reporter_coalesces_updates_while_worker_is_busy(self) -> None:
+        first_call_started = threading.Event()
+        release_first_call = threading.Event()
+        calls: list[str] = []
+
+        def sender(monitor: str) -> None:
+            calls.append(monitor)
+            if len(calls) == 1:
+                first_call_started.set()
+                release_first_call.wait(2)
+
+        reporter = play_utils.ProgressUpdateQueue(sender=sender)
+
+        reporter.submit("first")
+        self.assertTrue(first_call_started.wait(1))
+        reporter.submit("second")
+        reporter.submit("third")
+        release_first_call.set()
+
+        self.assertTrue(reporter.join(2))
+        self.assertEqual(calls, ["first", "third"])
+
+
+class LibraryChangeMonitorTests(unittest.TestCase):
+    def test_library_update_waits_until_not_playing_and_debounce_window_passes(
+        self,
+    ) -> None:
+        monitor = library_change_monitor.LibraryChangeMonitor()
+        monitor.minimum_update_interval = 30
+        monitor.last_library_change_check = 100
+
+        self.assertFalse(
+            monitor.should_process_update(
+                now=120,
+                is_playing=False,
+                screensaver_active=False,
+            )
+        )
+        self.assertFalse(
+            monitor.should_process_update(
+                now=131,
+                is_playing=True,
+                screensaver_active=False,
+            )
+        )
+        self.assertFalse(
+            monitor.should_process_update(
+                now=131,
+                is_playing=False,
+                screensaver_active=True,
+            )
+        )
+        self.assertTrue(
+            monitor.should_process_update(
+                now=131,
+                is_playing=False,
+                screensaver_active=False,
+            )
+        )
+
     def test_library_window_values_suppresses_view_refresh_errors(self) -> None:
         calls = []
 
@@ -855,6 +1116,161 @@ class BackgroundRequestTests(unittest.TestCase):
 
 
 class WebSocketClientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        FakeHomeWindow.props = {"userid": "user-id", "userimage": "DefaultUser.png"}
+        self.original_optional_registry = getattr(
+            websocket_client, "optional_feature_registry", None
+        )
+        self.original_home_window = websocket_client.HomeWindow
+        websocket_client.optional_feature_registry = OptionalFeatureRegistry(
+            now=lambda: 100.0
+        )
+        websocket_client.HomeWindow = FakeHomeWindow
+
+    def tearDown(self) -> None:
+        websocket_client.HomeWindow = self.original_home_window
+        if self.original_optional_registry is None:
+            delattr(websocket_client, "optional_feature_registry")
+        else:
+            websocket_client.optional_feature_registry = self.original_optional_registry
+
+    def test_websocket_404_marks_feature_temporarily_unsupported(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                self.closed = True
+
+        original_registry = getattr(websocket_client, "optional_feature_registry", None)
+        original_client_information = websocket_client.clientinfo.ClientInformation
+        registry = OptionalFeatureRegistry(now=lambda: 100.0)
+        websocket_client.clientinfo.ClientInformation = FakeClientInformation
+        websocket_client.optional_feature_registry = registry
+
+        try:
+            client = websocket_client.WebSocketClient(None)
+            fake_client = FakeClient()
+            client._client = fake_client
+            client._optional_feature_scope = "server-a|user-a"
+            client.on_error(Exception("Handshake status 404 Not Found"))
+        finally:
+            websocket_client.clientinfo.ClientInformation = original_client_information
+            if original_registry is None:
+                delattr(websocket_client, "optional_feature_registry")
+            else:
+                websocket_client.optional_feature_registry = original_registry
+
+        self.assertFalse(
+            registry.is_supported(FEATURE_WEBSOCKET, scope="server-a|user-a")
+        )
+        self.assertTrue(fake_client.closed)
+
+    def test_websocket_run_skips_when_feature_is_temporarily_unsupported(self) -> None:
+        created_websockets = []
+
+        class FakeWebSocketApp:
+            def __init__(self, url: str, **kwargs) -> None:
+                created_websockets.append({"url": url, **kwargs})
+
+        original_download_utils = websocket_client.downloadutils.DownloadUtils
+        original_client_information = websocket_client.clientinfo.ClientInformation
+        original_websocket_app = websocket_client.WebSocketApp
+        original_enable_trace = websocket_client.enableTrace
+        original_registry = getattr(websocket_client, "optional_feature_registry", None)
+        registry = OptionalFeatureRegistry(now=lambda: 100.0)
+        feature_scope = "%s|%s" % (
+            FakeDownloadUtils().get_server(),
+            FakeHomeWindow().get_property("userid"),
+        )
+        registry.mark_unsupported(
+            FEATURE_WEBSOCKET,
+            ttl_seconds=60.0,
+            scope=feature_scope,
+        )
+        websocket_client.downloadutils.DownloadUtils = FakeDownloadUtils
+        websocket_client.clientinfo.ClientInformation = FakeClientInformation
+        websocket_client.WebSocketApp = FakeWebSocketApp
+        websocket_client.enableTrace = lambda enabled: None
+        websocket_client.optional_feature_registry = registry
+
+        try:
+            client = websocket_client.WebSocketClient(None)
+            client.run()
+        finally:
+            websocket_client.downloadutils.DownloadUtils = original_download_utils
+            websocket_client.clientinfo.ClientInformation = original_client_information
+            websocket_client.WebSocketApp = original_websocket_app
+            websocket_client.enableTrace = original_enable_trace
+            if original_registry is None:
+                delattr(websocket_client, "optional_feature_registry")
+            else:
+                websocket_client.optional_feature_registry = original_registry
+
+        self.assertEqual(created_websockets, [])
+
+    def test_websocket_404_stops_reconnect_loop(self) -> None:
+        run_calls = []
+        close_calls = []
+
+        class FakeRunningMonitor:
+            def waitForAbort(self, timeout: int) -> bool:
+                return False
+
+            def abortRequested(self) -> bool:
+                return False
+
+        class FakeWebSocketApp:
+            def __init__(self, url: str, **kwargs) -> None:
+                self.on_error = kwargs["on_error"]
+
+            def run_forever(self, ping_interval: int) -> None:
+                run_calls.append(ping_interval)
+                self.on_error(Exception("Handshake status 404 Not Found"))
+
+            def close(self) -> None:
+                close_calls.append(True)
+
+        class CapturingLogger:
+            messages: list[str] = []
+
+            def debug(self, fmt: str, *args: object) -> None:
+                self.messages.append(fmt.format(*args))
+
+            def error(self, fmt: str, *args: object) -> None:
+                self.messages.append(fmt.format(*args))
+
+        original_download_utils = websocket_client.downloadutils.DownloadUtils
+        original_client_information = websocket_client.clientinfo.ClientInformation
+        original_websocket_app = websocket_client.WebSocketApp
+        original_enable_trace = websocket_client.enableTrace
+        original_log = websocket_client.log
+        original_monitor = websocket_client.xbmc.Monitor
+        logger = CapturingLogger()
+        websocket_client.downloadutils.DownloadUtils = FakeDownloadUtils
+        websocket_client.clientinfo.ClientInformation = FakeClientInformation
+        websocket_client.WebSocketApp = FakeWebSocketApp
+        websocket_client.enableTrace = lambda enabled: None
+        websocket_client.log = logger
+        websocket_client.xbmc.Monitor = FakeRunningMonitor
+
+        try:
+            client = websocket_client.WebSocketClient(None)
+            client.run()
+        finally:
+            websocket_client.downloadutils.DownloadUtils = original_download_utils
+            websocket_client.clientinfo.ClientInformation = original_client_information
+            websocket_client.WebSocketApp = original_websocket_app
+            websocket_client.enableTrace = original_enable_trace
+            websocket_client.log = original_log
+            websocket_client.xbmc.Monitor = original_monitor
+
+        self.assertEqual(run_calls, [10])
+        self.assertEqual(close_calls, [True])
+        joined_logs = "\n".join(logger.messages)
+        self.assertIn("WebSocket endpoint is not available", joined_logs)
+        self.assertNotIn("Reconnecting WebSocket", joined_logs)
+
     def test_websocket_trace_is_disabled_and_logged_url_is_redacted(self) -> None:
         created_websockets = []
         trace_values = []
@@ -1291,6 +1707,35 @@ class ScreensaverPlaybackTests(unittest.TestCase):
         self.assertEqual(player.stop_calls, 0)
         self.assertEqual(executed_commands, [])
         self.assertEqual(FakeHomeWindow.props.get("skip_select_user"), "true")
+
+    def test_screensaver_does_not_clear_cache_while_video_is_playing(self) -> None:
+        cache_clear_calls = []
+
+        class PlayingPlayer:
+            def isPlayingVideo(self) -> bool:
+                return True
+
+            def getPlayingFile(self) -> str:
+                return "playing-file"
+
+            def stop(self) -> None:
+                pass
+
+        play_utils.xbmc.Player = lambda: PlayingPlayer()
+        play_utils.xbmc.getCondVisibility = lambda condition: False
+        play_utils.clear_old_cache_data = lambda: cache_clear_calls.append("clear")
+
+        play_monitor = play_utils.PlaybackMonitorService()
+        play_monitor.played_information = {
+            "playing-file": {
+                "item_id": "item-1",
+            }
+        }
+        monitor = play_utils.MonitoringService(play_monitor)
+
+        monitor.screensaver_activated()
+
+        self.assertEqual(cache_clear_calls, [])
 
     def test_screensaver_deactivate_never_opens_change_user_automatically(
         self,

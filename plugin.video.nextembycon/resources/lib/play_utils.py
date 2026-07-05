@@ -10,6 +10,7 @@ from datetime import timedelta
 import json
 import os
 import base64
+import threading
 
 from .simple_logging import SimpleLogging
 from .downloadutils import DownloadUtils, redact_sensitive_data
@@ -1472,6 +1473,53 @@ def get_volume() -> tuple[int | None, bool | None]:
     return volume, muted
 
 
+class ProgressUpdateQueue:
+    def __init__(self, sender=None) -> None:
+        self._sender = sender or send_progress
+        self._lock = threading.Lock()
+        self._pending_monitor = None
+        self._running = False
+        self._worker: threading.Thread | None = None
+
+    def submit(self, monitor: PlaybackMonitorService) -> None:
+        with self._lock:
+            self._pending_monitor = monitor
+            if self._running:
+                return
+            self._running = True
+            self._worker = threading.Thread(target=self._run, daemon=True)
+            self._worker.start()
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                monitor = self._pending_monitor
+                self._pending_monitor = None
+                if monitor is None:
+                    self._running = False
+                    return
+
+            try:
+                self._sender(monitor)
+            except Exception as error:
+                log.error("Progress update failed: {0}", error)
+
+    def join(self, timeout: float | None = None) -> bool:
+        worker = self._worker
+        if worker is None:
+            return True
+        worker.join(timeout)
+        with self._lock:
+            return not self._running
+
+
+progress_update_queue = ProgressUpdateQueue()
+
+
+def queue_progress(monitor: PlaybackMonitorService) -> None:
+    progress_update_queue.submit(monitor)
+
+
 def prompt_for_stop_actions(item_id: str, data: dict) -> None:
     log.debug("prompt_for_stop_actions Called : {0}", data)
 
@@ -1786,7 +1834,7 @@ class PlaybackMonitorService(xbmc.Player):
 
         if play_data is not None:
             play_data["paused"] = True
-            send_progress(self)
+            queue_progress(self)
 
     def onPlayBackResumed(self) -> None:
         # Will be called when kodi resumes the video
@@ -1796,12 +1844,12 @@ class PlaybackMonitorService(xbmc.Player):
 
         if play_data is not None:
             play_data["paused"] = False
-            send_progress(self)
+            queue_progress(self)
 
     def onPlayBackSeek(self, time: int, seekOffset: int) -> None:  # noqa: ARG002
         # Will be called when kodi seeks in video
         log.info("onPlayBackSeek")
-        send_progress(self)
+        queue_progress(self)
 
 
 class MonitoringService(xbmc.Monitor):
@@ -1884,7 +1932,10 @@ class MonitoringService(xbmc.Monitor):
 
         # xbmc.executebuiltin("Dialog.Close(selectdialog, true)")
 
-        clear_old_cache_data()
+        if player.isPlayingVideo():
+            log.debug("Screen Saver Activated : skipping cache cleanup during playback")
+        else:
+            clear_old_cache_data()
 
         cache_images = settings.getSetting("cacheImagesOnScreenSaver") == "true"
         if cache_images:
